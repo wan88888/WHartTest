@@ -78,6 +78,15 @@ SECRET_KEY = os.environ.get(
 # 将字符串环境变量转换为布尔调试开关。
 DEBUG = os.environ.get("DJANGO_DEBUG", "True") == "True"
 
+FEISHU_LOGIN_ENABLED = os.getenv("FEISHU_LOGIN_ENABLED", "false").lower() == "true"
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "").strip()
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "").strip()
+FEISHU_REDIRECT_URI = os.getenv("FEISHU_REDIRECT_URI", "").strip()
+FEISHU_ALLOWED_TENANT_KEYS = [
+    key.strip() for key in os.getenv("FEISHU_ALLOWED_TENANT_KEYS", "").split(",") if key.strip()
+]
+FEISHU_AUTO_CREATE_USER = os.getenv("FEISHU_AUTO_CREATE_USER", "true").lower() == "true"
+
 # ALLOWED_HOSTS 配置
 # 从环境变量读取允许主机（逗号分隔）。
 # 生产环境应通过 DJANGO_ALLOWED_HOSTS 配置正式域名。

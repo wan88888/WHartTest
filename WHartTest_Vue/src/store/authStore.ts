@@ -3,6 +3,7 @@ import {
   login as loginService,
   register as registerService,
   type AuthServiceLoginResponse,
+  type ApiTokenResponseData,
   type AuthServiceRegisterResponse,
 } from '@/services/authService';
 import { getUserPermissions } from '@/services/permissionService';
@@ -19,6 +20,8 @@ interface User {
   is_staff: boolean;
   is_active: boolean;
   groups: any[];
+  display_name?: string;
+  avatar_url?: string;
 }
 
 // 权限对象接口
@@ -87,6 +90,24 @@ export const useAuthStore = defineStore('auth', {
   },
   
   actions: {
+    acceptSession(data: ApiTokenResponseData) {
+      this.isAuthenticated = true;
+      // 存储API返回的用户信息
+      this.user = data.user;
+      this.accessToken = data.access;
+      this.refreshToken = data.refresh;
+
+      // 直接存储到 localStorage
+      localStorage.setItem('auth-isAuthenticated', 'true');
+      localStorage.setItem('auth-user', JSON.stringify(this.user));
+      localStorage.setItem('auth-accessToken', this.accessToken);
+      localStorage.setItem('auth-refreshToken', this.refreshToken);
+
+      // 异步获取用户权限（不阻塞登录流程）
+      this.loadUserPermissions().catch(error => {
+        console.error('获取用户权限失败:', error);
+      });
+    },
     /**
      * 用户登录 Action
      * @param username 用户名
@@ -99,23 +120,7 @@ export const useAuthStore = defineStore('auth', {
       try {
         const response: AuthServiceLoginResponse = await loginService(username, password);
         if (response.success && response.data) {
-          this.isAuthenticated = true;
-          // 存储API返回的用户信息
-          this.user = response.data.user;
-          this.accessToken = response.data.access;
-          this.refreshToken = response.data.refresh;
-
-          // 直接存储到 localStorage
-          localStorage.setItem('auth-isAuthenticated', 'true');
-          localStorage.setItem('auth-user', JSON.stringify(this.user));
-          localStorage.setItem('auth-accessToken', this.accessToken);
-          localStorage.setItem('auth-refreshToken', this.refreshToken);
-
-          // 异步获取用户权限（不阻塞登录流程）
-          this.loadUserPermissions().catch(error => {
-            console.error('获取用户权限失败:', error);
-          });
-
+          this.acceptSession(response.data);
           this.isLoading = false;
           return true;
         } else {

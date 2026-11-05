@@ -295,6 +295,7 @@ import {
   type UpdateProjectRequest
 } from '@/services/projectService';
 import { getUserList } from '@/services/userService';
+import { useProjectStore } from '@/store/projectStore';
 import { useAuthStore } from '@/store/authStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 
@@ -305,6 +306,7 @@ const searchKeyword = ref('');
 
 // 权限检查
 const authStore = useAuthStore();
+const projectStore = useProjectStore();
 const { locale, isEnglish } = useAppI18n();
 const hasProjectPermission = ref(false); // 默认无权限，等待权限检查结果
 
@@ -987,7 +989,7 @@ const handleAddProject = async () => {
 
     if (response.success) {
       Message.success(pageText.value.projectCreatedSuccess);
-      fetchProjectList();
+      await Promise.all([fetchProjectList(), projectStore.fetchProjects()]);
       // 关闭模态框
       addProjectModalVisible.value = false;
     } else {
@@ -1088,7 +1090,7 @@ const handleEditProject = async () => {
 
     if (response.success) {
       Message.success(pageText.value.projectUpdatedSuccess);
-      fetchProjectList();
+      await Promise.all([fetchProjectList(), projectStore.fetchProjects()]);
       editProjectModalVisible.value = false;
     } else {
       Message.error(response.error || pageText.value.updateProjectFailed);
@@ -1116,8 +1118,8 @@ const deleteProject = (project: Project, event?: Event) => {
         const response = await deleteProjectService(project.id);
         if (response.success) {
           Message.success(pageText.value.projectDeletedSuccess);
-          // 刷新项目列表
-          fetchProjectList();
+          projectStore.removeProject(project.id);
+          await Promise.all([fetchProjectList(), projectStore.fetchProjects()]);
         } else {
           Message.error(response.error || pageText.value.deleteProjectFailed);
         }

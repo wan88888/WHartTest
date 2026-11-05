@@ -1,4 +1,11 @@
-# 导入 Django Admin 注册入口。
 from django.contrib import admin
 
-# 当前 accounts 应用未定义自有模型，无需额外后台注册。
+from .models import FeishuIdentity
+
+
+@admin.register(FeishuIdentity)
+class FeishuIdentityAdmin(admin.ModelAdmin):
+    list_display = ['user', 'display_name', 'app_id', 'open_id', 'tenant_key']
+    search_fields = ['user__username', 'display_name', 'open_id', 'tenant_key']
+    autocomplete_fields = ['user']
+    readonly_fields = ['created_at']

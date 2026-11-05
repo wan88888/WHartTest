@@ -120,6 +120,17 @@ class RequirementDocumentViewSet(BaseModelViewSet):
             return RequirementDocumentDetailSerializer
         return RequirementDocumentSerializer
 
+    @action(detail=False, methods=['post'], url_path='feishu-authorize')
+    def feishu_authorize(self, request):
+        from accounts.feishu import start_authorization
+        from .feishu_import import parse_link, document_binding
+
+        kind, _ = parse_link(request.data.get('feishu_url'))
+        scopes = ['docx:document:readonly']
+        if kind == 'wiki':
+            scopes.append('wiki:node:read')
+        return start_authorization(request, binding=document_binding(request), scopes=scopes)
+
     def perform_create(self, serializer):
         """创建文档时自动设置上传人并提取内容"""
         document = serializer.save(uploader=self.request.user)

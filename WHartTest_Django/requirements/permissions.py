@@ -14,6 +14,11 @@ class IsProjectMemberForRequirement(permissions.BasePermission):
         # 获取项目ID
         project_id = None
         
+        if getattr(view, 'action', None) in ('create', 'feishu_authorize'):
+            project_id = str(request.data.get('project', ''))
+            return (project_id.isascii() and project_id.isdigit() and len(project_id) <= 19
+                    and ProjectMember.objects.filter(project_id=project_id, user=request.user).exists())
+
         # 1. 从查询参数获取项目ID (用于列表视图，如 ?project=43)
         if hasattr(request, 'query_params') and 'project' in request.query_params:
             project_id = request.query_params.get('project')

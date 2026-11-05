@@ -1,0 +1,2 @@
+# Celery 5.4 + redis-py 5.2: Kombu 5.7 requires redis-py >= 6.1.
+kombu==5.5.4

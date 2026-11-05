@@ -35,6 +35,11 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
     component: LoginView // 指定该路由渲染的页面组件。
   },
   {
+    path: '/auth/feishu/callback',
+    name: 'FeishuCallback',
+    component: () => import('@/views/FeishuCallback.vue'),
+  },
+  {
     path: '/register', // 定义注册页访问路径。
     name: 'Register', // 定义注册路由名称。
     component: RegisterView // 指定注册路由对应组件。
@@ -48,6 +53,7 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
       {
         path: 'dashboard', // 定义仪表盘子路径（最终为 /dashboard）。
         name: 'Dashboard', // 定义仪表盘路由名称。
+        meta: { requiresProject: true },
         component: DashboardView, // 指定仪表盘组件。
       },
       {
@@ -73,16 +79,19 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
       {
         path: 'testcases', // 定义测试用例管理子路径。
         name: 'TestCaseManagement', // 定义测试用例管理路由名称。
+        meta: { requiresProject: true },
         component: TestCaseManagementView, // 指定测试用例管理页面组件。
       },
       {
         path: 'testsuites', // 定义测试套件管理子路径。
         name: 'TestSuiteManagement', // 定义测试套件管理路由名称。
+        meta: { requiresProject: true },
         component: TestSuiteManagementView, // 指定测试套件管理页面组件。
       },
       {
         path: 'test-executions', // 定义测试执行历史子路径。
         name: 'TestExecutionHistory', // 定义测试执行历史路由名称。
+        meta: { requiresProject: true },
         component: TestExecutionHistoryView, // 指定测试执行历史页面组件。
       },
       {
@@ -93,11 +102,13 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
       {
         path: 'langgraph-chat', // 定义 LangGraph 聊天子路径。
         name: 'LangGraphChat', // 定义 LangGraph 聊天路由名称。
+        meta: { requiresProject: true },
         component: LangGraphChatView, // 指定 LangGraph 聊天页面组件。
       },
       {
         path: 'knowledge-management', // 定义知识库管理子路径。
         name: 'KnowledgeManagement', // 定义知识库管理路由名称。
+        meta: { requiresProject: true },
         component: KnowledgeManagementView, // 指定知识库管理页面组件。
       },
       {
@@ -217,6 +228,7 @@ const routes: Array<RouteRecordRaw> = [ // 声明路由表数组，类型约束�
       {
         path: 'ui-automation', // 定义 UI 自动化子路径。
         name: 'UiAutomation', // 定义 UI 自动化路由名称。
+        meta: { requiresProject: true },
         component: UiAutomationView, // 指定 UI 自动化页面组件。
       },
       {
@@ -270,14 +282,14 @@ router.beforeEach((to, _from, next) => { // 注册全局前置守卫，在每次
   console.log('[Router Guard] 认证状态:', { isLoggedIn, toName: to.name }); // 输出鉴权判定前的状态日志。
 
   // 不需要认证的白名单路由
-  const publicRoutes = ['Login', 'Register']; // 声明公开路由名称白名单。
+  const publicRoutes = ['Login', 'Register', 'FeishuCallback']; // 声明公开路由名称白名单。
   const isPublicRoute = publicRoutes.includes(to.name as string); // 判断目标路由是否属于公开白名单。
 
   if (!isLoggedIn && !isPublicRoute) { // 未登录且访问受保护路由时触发重定向。
     // 未登录且不是公开路由，重定向到登录页
     console.log('[Router Guard] 未登录，重定向到登录页'); // 输出未登录拦截日志。
     next({ name: 'Login', query: { redirect: to.fullPath } }); // 跳转登录页并携带原目标地址以支持登录后回跳。
-  } else if (isLoggedIn && isPublicRoute) { // 已登录但访问登录/注册页时触发反向重定向。
+  } else if (isLoggedIn && isPublicRoute && !(to.name === 'FeishuCallback' && String(to.query.state).startsWith('doc.'))) { // 已登录但访问登录/注册页时触发反向重定向。
     // 已登录但访问登录/注册页，重定向到首页
     console.log('[Router Guard] 已登录，重定向到首页'); // 输出已登录访问公开页的重定向日志。
     next({ name: 'Dashboard' }); // 直接跳到仪表盘，避免重复登录/注册操作。

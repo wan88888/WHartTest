@@ -59,6 +59,9 @@ export interface RequirementDocument {
 
 // 创建文档请求
 export interface CreateDocumentRequest {
+  feishu_url?: string;
+  feishu_code?: string;
+  feishu_state?: string;
   title: string;
   description?: string;
   document_type: DocumentType;

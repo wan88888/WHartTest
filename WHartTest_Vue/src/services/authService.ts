@@ -12,10 +12,12 @@ interface UserInfo {
   is_staff: boolean;
   is_active: boolean;
   groups: any[];
+  display_name?: string;
+  avatar_url?: string;
 }
 
 // API 响应的数据结构
-interface ApiTokenResponseData {
+export interface ApiTokenResponseData {
   refresh: string;
   access: string;
   user: UserInfo;

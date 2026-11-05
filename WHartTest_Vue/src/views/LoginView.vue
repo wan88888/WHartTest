@@ -143,7 +143,7 @@
               <span>{{ rememberMeLabel }}</span>
             </label>
 
-            <button type="submit" class="login-btn" :disabled="isLoading">
+            <button type="submit" class="login-btn" :disabled="isLoading || feishuStarting">
               <template v-if="!isLoading">{{ submitLabel }}</template>
               <template v-else>
                 <svg class="spinner" viewBox="0 0 24 24" fill="none">
@@ -152,6 +152,11 @@
                 </svg>
                 {{ submittingLabel }}
               </template>
+            </button>
+
+            <button v-if="feishuEnabled" type="button" class="login-btn feishu-btn"
+              :disabled="isLoading || feishuStarting" @click="startFeishu">
+              {{ isEnglish ? 'Sign in with Feishu' : '飞书登录' }}
             </button>
 
             <div v-if="errorMessage" class="error-msg">
@@ -181,6 +186,7 @@ import { useAppI18n } from '@/composables/useAppI18n'
 import { useAuthStore } from '@/store/authStore'
 import { useSystemConfigStore } from '@/store/systemConfigStore'
 import { useThemeStore } from '@/store/themeStore'
+import { feishuLoginAvailable, authorizeFeishu } from '@/services/feishuAuth'
 import AppLocaleToggle from '@/components/AppLocaleToggle.vue'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
@@ -336,6 +342,21 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
   }
 }
 
+const feishuEnabled = ref(false)
+const feishuStarting = ref(false)
+
+const startFeishu = async () => {
+  if (feishuStarting.value) return
+  feishuStarting.value = true
+  authStore.loginError = null
+  try {
+    await authorizeFeishu(router.currentRoute.value.query.redirect)
+  } catch (error) {
+    authStore.loginError = error instanceof Error ? error.message : (isEnglish.value ? 'Feishu sign-in failed.' : '飞书登录失败。')
+    feishuStarting.value = false
+  }
+}
+
 const handleLogin = async () => {
   if (!username.value || !password.value) {
     Message.warning(loginRequiredMessage.value)
@@ -366,6 +387,7 @@ watch(loginDialogVisible, (visible) => {
 })
 
 onMounted(() => {
+  feishuLoginAvailable().then(enabled => { feishuEnabled.value = enabled })
   authStore.checkAuthStatus()
   if (authStore.isLoggedIn) {
     router.push({ name: 'Dashboard' })
@@ -393,6 +415,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.login-btn.feishu-btn {
+  background: transparent;
+  border: 1px solid #3370ff;
+  color: #3370ff;
+}
+
 .login-page {
   position: relative;
   min-height: 100vh;

@@ -5,6 +5,7 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 # 导入账户模块下的视图。
+from . import feishu
 from .views import (
     UserCreateAPIView, CurrentUserAPIView,
     GroupViewSet, PermissionViewSet, UserViewSet, ContentTypeViewSet
@@ -19,6 +20,9 @@ router.register(r'content-types', ContentTypeViewSet, basename='content-type')  
 
 # 声明账户模块 URL 列表。
 urlpatterns = [
+    path('feishu/config/', feishu.login_config),
+    path('feishu/authorize/', feishu.authorize),
+    path('feishu/callback/', feishu.callback),
     path('', include(router.urls)),  # 挂载 ViewSet 自动路由。
     path('register/', UserCreateAPIView.as_view(), name='user-register'),  # 用户注册端点。
     path('me/', CurrentUserAPIView.as_view(), name='user-me'),  # 当前登录用户信息端点。

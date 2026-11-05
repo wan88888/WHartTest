@@ -12,6 +12,7 @@ User = get_user_model()
 
 # 敏感字段掩码列表
 SENSITIVE_EXACT_KEYS = {
+    'feishu_code', 'feishu_state', 'feishu_url', 'authorize_url',
     'password', 'password_confirm', 'token', 'access', 'refresh',
     'secret', 'api_key', 'key', 'private_key', 'authorization', 'credential'
 }
@@ -27,6 +28,7 @@ USERNAME_CANDIDATE_KEYS = {
 ALWAYS_IGNORED_PATH_KEYWORDS = (
     '/operation-logs/',
     '/token/refresh/',
+    '/accounts/feishu/',  # OAuth codes and state must stay out of operation logs.
 )
 
 READ_ONLY_IGNORED_PATH_KEYWORDS = (

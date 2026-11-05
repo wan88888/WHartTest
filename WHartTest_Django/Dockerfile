@@ -327,3 +327,8 @@ EXPOSE 8000
 
 # 设置启动脚本为入口点
 ENTRYPOINT ["/app/entrypoint.sh"]
+
+# Apply runtime compatibility constraints without rebuilding browser layers.
+COPY docker/constraints-runtime.txt /app/constraints-runtime.txt
+RUN /usr/local/bin/python -m pip --python /opt/venv/bin/python install \
+    --no-cache-dir --index-url "${PIP_INDEX_URL}" -r /app/constraints-runtime.txt

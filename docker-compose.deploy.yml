@@ -1,0 +1,61 @@
+# Local workstation deployment. Loaded with docker-compose.local.yml via .env.
+services:
+  backend:
+    image: wharttest-backend:local
+    ports: !override
+      - "127.0.0.1:8912:8000"
+    environment:
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,backend
+      DJANGO_CORS_ALLOWED_ORIGINS: http://localhost:8913,http://127.0.0.1:8913
+      DJANGO_CSRF_TRUSTED_ORIGINS: http://localhost:8913,http://127.0.0.1:8913
+      WHARTTEST_API_KEY: ${WHARTTEST_API_KEY}
+  skill-runner:
+    image: wharttest-backend:local
+    build: !reset null
+    pull_policy: never
+  frontend:
+    ports: !override
+      - "127.0.0.1:8913:80"
+  postgres:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  qdrant:
+    ports: !reset []
+  weixin-plugin-host:
+    ports: !reset []
+  mcp:
+    ports: !override
+      - "127.0.0.1:8914:8006"
+      - "127.0.0.1:8915:8007"
+  playwright-mcp:
+    ports: !override
+      - "127.0.0.1:8916:8931"
+  actuator:
+    build:
+      context: .
+      dockerfile: deploy-scripts/Dockerfile.actuator-local
+      additional_contexts:
+        backend_image: service:backend
+      args:
+        PIP_INDEX_URL: ${DOCKER_PIP_INDEX_URL:-https://pypi.org/simple}
+    container_name: wharttest-actuator
+    environment:
+      WHARTTEST_ACTUATOR_WS_URL: ws://backend:8000/ws/ui/actuator/
+      WHARTTEST_ACTUATOR_API_URL: http://backend:8000
+      WHARTTEST_ACTUATOR_API_KEY: ${WHARTTEST_API_KEY}
+      WHARTTEST_ACTUATOR_WS_TOKEN: ${UI_WS_ACTUATOR_TOKEN}
+      WHARTTEST_ACTUATOR_ID: local-docker
+      WHARTTEST_ACTUATOR_NAME: Local Docker Chromium
+      WHARTTEST_ACTUATOR_USE_GUI: "false"
+      WHARTTEST_ACTUATOR_HEADLESS: "true"
+      WHARTTEST_ACTUATOR_CONTAINER_DATA_DIR: /app/actuator/data
+    volumes:
+      - ./data/actuator:/app/actuator/data
+    shm_size: 1gb
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - wharttest-network
+    restart: unless-stopped

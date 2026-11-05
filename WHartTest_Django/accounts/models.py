@@ -96,3 +96,33 @@ class SystemConfig(models.Model):
     def __str__(self):
         return f"SystemConfig(name={self.name})"
 
+
+
+class FeishuIdentity(models.Model):
+    """Only verified Feishu identities may be associated with platform users."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='feishu_identities')
+    app_id = models.CharField(max_length=128)
+    open_id = models.CharField(max_length=128)
+    tenant_key = models.CharField(max_length=128)
+    display_name = models.CharField(max_length=150, blank=True)
+    avatar_url = models.URLField(max_length=2048, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['app_id', 'open_id'], name='unique_feishu_app_identity'),
+            models.UniqueConstraint(fields=['app_id', 'user'], name='unique_feishu_app_user'),
+        ]
+        verbose_name = '飞书账号关联'
+        verbose_name_plural = '飞书账号关联'
+
+
+class FeishuLoginAttempt(models.Model):
+    """Short-lived state shared across workers; consumed with an atomic UPDATE."""
+    state_hash = models.CharField(max_length=64, unique=True)
+    browser_hash = models.CharField(max_length=64)
+    code_verifier = models.CharField(max_length=128)
+    app_id = models.CharField(max_length=128)
+    redirect_uri = models.URLField(max_length=2048)
+    expires_at = models.DateTimeField(db_index=True)
+    consumed_at = models.DateTimeField(null=True)

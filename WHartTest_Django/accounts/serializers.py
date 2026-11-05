@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib.auth.models import User, Group, Permission
 from django.contrib.contenttypes.models import ContentType
 from rest_framework import serializers
@@ -327,6 +328,15 @@ class UserDetailSerializer(serializers.ModelSerializer):
             "groups",
         )  # 根据需要添加更多字段
         read_only_fields = fields
+
+
+def session_user_data(user):
+    data = UserDetailSerializer(user).data
+    if settings.FEISHU_APP_ID:
+        identity = user.feishu_identities.filter(app_id=settings.FEISHU_APP_ID).first()
+        if identity:
+            data.update(display_name=identity.display_name, avatar_url=identity.avatar_url)
+    return data
 
 
 class UserUpdateSerializer(serializers.ModelSerializer):
@@ -1260,7 +1270,6 @@ class MyTokenObtainPairSerializer(BaseTokenObtainPairSerializer):
         data = super().validate(attrs)
 
         # 添加用户基础信息
-        user_serializer = UserDetailSerializer(self.user)
-        data["user"] = user_serializer.data
+        data["user"] = session_user_data(self.user)
 
         return data

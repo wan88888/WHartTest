@@ -17,7 +17,7 @@ from rest_framework_simplejwt.views import (
 from .serializers import (
     UserSerializer,
     UserRegistrationSerializer,
-    UserDetailSerializer,
+    UserDetailSerializer, session_user_data,
     UserUpdateSerializer,
     GroupSerializer,
     PermissionSerializer,
@@ -58,8 +58,7 @@ class CurrentUserAPIView(APIView):
 
     def get(self, request):
         # 认证通过后直接返回当前用户详情，避免客户端再额外请求用户编号。
-        serializer = UserDetailSerializer(request.user)
-        return Response(serializer.data)
+        return Response(session_user_data(request.user))
 
 
 class GroupViewSet(viewsets.ModelViewSet):

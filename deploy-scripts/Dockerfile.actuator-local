@@ -1,0 +1,12 @@
+# Reuse the backend's Python, browser libraries and fonts on this workstation.
+FROM backend_image
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
+WORKDIR /app/actuator
+COPY WHartTest_Actuator/requirements.txt ./requirements.txt
+RUN python -m ensurepip \
+    && python -m pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" -r requirements.txt \
+    && playwright install chromium
+COPY WHartTest_Actuator/ ./
+ENV WHARTTEST_ACTUATOR_DOCKER=1
+ENTRYPOINT ["python", "main.py"]

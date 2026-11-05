@@ -16,7 +16,7 @@ type RequestConfig = {
 };
 
 // 获取智能的API基础URL
-function getApiBaseUrl() {
+export function getApiBaseUrl() {
   const envUrl = import.meta.env.VITE_API_BASE_URL;
   const useProxy = import.meta.env.VITE_USE_PROXY === 'true' || import.meta.env.VITE_USE_PROXY === true;
 

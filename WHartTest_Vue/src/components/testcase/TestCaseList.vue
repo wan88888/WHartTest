@@ -7,7 +7,6 @@
           allow-clear
           class="search-input"
           @search="onSearch"
-          :style="{ width: isSmallScreen ? '70px' : '130px' }"
           v-model="localSearchKeyword"
         />
         <a-select
@@ -15,7 +14,6 @@
           :placeholder="isSmallScreen ? pageText.priorityShort : pageText.priorityFilter"
           allow-clear
           class="level-filter"
-          :style="{ width: isSmallScreen ? '90px' : '130px' }"
           @change="onLevelChange"
         >
           <a-option v-for="option in levelOptions" :key="option.value" :value="option.value">
@@ -24,13 +22,12 @@
         </a-select>
         <a-select
           v-model="selectedReviewStatuses"
-          :placeholder="pageText.reviewStatusFilter"
+          :placeholder="isSmallScreen ? pageText.reviewStatus : pageText.reviewStatusFilter"
           multiple
           allow-clear
           :max-tag-count="1"
           tag-nowrap
           class="review-status-filter"
-          :style="{ width: '190px' }"
           @change="onReviewStatusChange"
         >
           <a-option v-for="option in reviewStatusOptions" :key="option.value" :value="option.value">
@@ -42,35 +39,26 @@
           :placeholder="isSmallScreen ? pageText.typeShort : pageText.testTypeFilter"
           allow-clear
           class="test-type-filter"
-          :style="{ width: isSmallScreen ? '90px' : '130px' }"
           @change="onTestTypeChange"
         >
           <a-option v-for="option in testTypeOptions" :key="option.value" :value="option.value">
             {{ option.label }}
           </a-option>
         </a-select>
-        <a-button type="outline" class="io-btn" @click="handleExport">
+      </div>
+      <div class="action-buttons">
+        <a-button type="outline" @click="handleExport">
           <template #icon>
             <icon-download />
           </template>
-          <span class="io-btn-text">{{ pageText.export }}</span>
+          <span>{{ pageText.export }}</span>
         </a-button>
-        <a-button type="outline" class="io-btn" @click="handleImport">
+        <a-button type="outline" @click="handleImport">
           <template #icon>
             <icon-upload />
           </template>
-          <span class="io-btn-text">{{ pageText.import }}</span>
+          <span>{{ pageText.import }}</span>
         </a-button>
-        <a-button
-          v-if="selectedTestCaseIds.length > 0"
-          type="primary"
-          status="danger"
-          @click="handleBatchDelete"
-        >
-          {{ pageText.batchDeleteButton(selectedTestCaseIds.length) }}
-        </a-button>
-      </div>
-      <div class="action-buttons">
         <a-badge :count="runningTasksCount" :dot="false" :max-count="99">
           <a-button type="outline" class="task-queue-btn" @click="emit('open-task-queue')">
             <template #icon>
@@ -82,6 +70,14 @@
         </a-badge>
         <a-button type="primary" @click="handleGenerateTestCases">{{ pageText.generateCases }}</a-button>
         <a-button type="primary" @click="handleAddTestCase">{{ pageText.addCase }}</a-button>
+        <a-button
+          v-if="selectedTestCaseIds.length > 0"
+          type="primary"
+          status="danger"
+          @click="handleBatchDelete"
+        >
+          {{ pageText.batchDeleteButton(selectedTestCaseIds.length) }}
+        </a-button>
       </div>
     </div>
 
@@ -297,7 +293,7 @@ const { runningTasksCount } = useTestCaseExecutionQueue();
 const pageText = computed(() => (
   isEnglish.value
     ? {
-        searchPlaceholder: 'Search case name/precondition',
+        searchPlaceholder: 'Case name',
         priorityShort: 'Priority',
         priorityFilter: 'Filter priority',
         reviewStatusFilter: 'Filter review status',
@@ -352,7 +348,7 @@ const pageText = computed(() => (
         batchDeleteError: 'An error occurred while batch deleting test cases',
       }
     : {
-        searchPlaceholder: '搜索用例名称/前置条件',
+        searchPlaceholder: '用例名称',
         priorityShort: '优先级',
         priorityFilter: '筛选优先级',
         reviewStatusFilter: '筛选审核状态',
@@ -486,9 +482,7 @@ const localSearchKeyword = ref('');
 const selectedLevel = ref<string>('');
 const selectedTestType = ref<string>('');
 const selectedOrdering = ref<string>('-created_at');
-// 默认选中除"不可用"之外的所有状态
-const DEFAULT_REVIEW_STATUSES: ReviewStatus[] = ['pending_review', 'approved', 'needs_optimization', 'optimization_pending_review'];
-const selectedReviewStatuses = ref<ReviewStatus[]>([...DEFAULT_REVIEW_STATUSES]);
+const selectedReviewStatuses = ref<ReviewStatus[]>([]);
 const testCaseData = ref<TestCase[]>([]);
 const selectedTestCaseIds = ref<number[]>([]);
 const importModalRef = ref<InstanceType<typeof ImportModal> | null>(null);
@@ -999,7 +993,7 @@ watch(currentProjectId, () => {
   selectedLevel.value = ''; // 项目切换时清空优先级筛选
   selectedTestType.value = ''; // 项目切换时清空测试类型筛选
   selectedOrdering.value = '-created_at'; // 项目切换时重置排序
-  selectedReviewStatuses.value = [...DEFAULT_REVIEW_STATUSES]; // 项目切换时重置审核状态筛选
+  selectedReviewStatuses.value = []; // 项目切换时重置审核状态筛选
   fetchTestCases();
 });
 
@@ -1039,80 +1033,54 @@ defineExpose({
 }
 
 .page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 16px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
+  display: grid;
   gap: 10px;
+  flex-shrink: 0;
+  margin-bottom: 16px;
+  container-type: inline-size;
 }
 
 .search-box {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) repeat(3, minmax(0, 1fr));
   gap: 8px;
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
+  align-items: center;
 }
 
 .search-box > * {
-  margin-left: 0 !important;
-  flex-shrink: 1;
+  min-width: 0;
+  width: 100%;
 }
 
 .action-buttons {
   display: flex;
-  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
-  flex-shrink: 0;
 }
 
-.action-buttons > * {
-  margin-right: 0 !important;
-}
-
-.search-input {
-  width: 200px;
-  min-width: 120px;
-  flex-shrink: 1;
-}
-
-.level-filter {
-  flex-shrink: 1;
-}
-
-.review-status-filter {
-  width: 10px;
-  flex-shrink: 0;
-}
-
-.test-type-filter {
-  flex-shrink: 1;
-}
-
-.review-status-filter :deep(.arco-select-view-multiple) {
-  flex-wrap: nowrap;
-  overflow: hidden;
-}
-
-/* 导入导出按钮响应式 */
-.io-btn {
-  flex-shrink: 0;
-}
-
-@media (max-width: 1200px) {
-  .io-btn-text {
-    display: none;
+@container (max-width: 600px) {
+  .search-box {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
-  .io-btn {
-    width: 32px;
-    padding: 0;
+
+  .search-box :deep(.arco-select-view) {
+    padding-inline: 8px;
   }
-  .io-btn :deep(.arco-btn-icon) {
-    margin-right: 0;
+
+  .action-buttons {
+    gap: 6px;
+  }
+
+  .action-buttons :deep(.arco-btn) {
+    padding-inline: 8px;
+  }
+}
+
+@container (max-width: 440px) {
+  .search-box {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

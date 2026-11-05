@@ -143,7 +143,7 @@
       v-model:visible="uploadModalVisible"
       :title="pageText.uploadRequirementDocument"
       width="600px"
-      @ok="handleUpload"
+      @before-ok="handleUpload"
       @cancel="resetUploadForm"
       :confirm-loading="uploadLoading"
     >
@@ -165,9 +165,14 @@
         </a-form-item>
         <a-form-item :label="pageText.uploadMethod" field="uploadType">
           <a-radio-group v-model="uploadForm.uploadType" @change="handleUploadTypeChange">
+            <a-radio value="feishu">{{ pageText.feishuDocument }}</a-radio>
             <a-radio value="file">{{ pageText.uploadFile }}</a-radio>
             <a-radio value="content">{{ pageText.directInput }}</a-radio>
           </a-radio-group>
+        </a-form-item>
+        <a-form-item v-if="uploadForm.uploadType === 'feishu'" :label="pageText.feishuLink" required>
+          <a-input v-model="uploadForm.feishu_url" :placeholder="pageText.feishuPlaceholder" />
+          <template #extra>{{ pageText.feishuHint }}</template>
         </a-form-item>
         <a-form-item
           v-if="uploadForm.uploadType === 'file'"
@@ -251,12 +256,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue';
+import { ref, reactive, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { IconPlus, IconUpload, IconFile, IconDelete } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { useProjectStore } from '@/store/projectStore';
+import { startImport, getImportDraft, clearImportDraft } from '../services/feishuImport';
 import { RequirementDocumentService } from '../services/requirementService';
 import { normalizeListPayload } from '@/features/api-testing/services/responseHelpers';
 import type {
@@ -299,6 +305,10 @@ const pageText = computed(() => (
         documentDescription: 'Document description',
         enterDocumentDescription: 'Enter document description (optional)',
         uploadMethod: 'Upload method',
+        feishuDocument: 'Feishu document',
+        feishuLink: 'Feishu document link',
+        feishuPlaceholder: 'Paste a Feishu document or wiki document link',
+        feishuHint: 'Confirm to authorize Feishu to read and import the document text.',
         uploadFile: 'Upload file',
         directInput: 'Direct input',
         selectFile: 'Select file',
@@ -360,6 +370,10 @@ const pageText = computed(() => (
         documentDescription: '文档描述',
         enterDocumentDescription: '请输入文档描述（可选）',
         uploadMethod: '上传方式',
+        feishuDocument: '飞书文档',
+        feishuLink: '飞书文档链接',
+        feishuPlaceholder: '请粘贴飞书文档或知识库文档链接',
+        feishuHint: '点击确定后前往飞书授权，将文档正文导入当前项目。',
         uploadFile: '上传文件',
         directInput: '直接输入',
         selectFile: '选择文件',
@@ -501,12 +515,13 @@ const uploadFormRef = ref();
 const uploadRef = ref();
 const fileList = ref<any[]>([]);
 
-const uploadForm = reactive<CreateDocumentRequest & { uploadType: 'file' | 'content' }>({
+const uploadForm = reactive<CreateDocumentRequest & { uploadType: 'feishu' | 'file' | 'content' }>({
   title: '',
   description: '',
-  document_type: 'pdf',
+  document_type: 'txt',
   project: '',
-  uploadType: 'file',
+  uploadType: 'feishu',
+  feishu_url: '',
   file: undefined,
   content: ''
 });
@@ -746,7 +761,7 @@ const handleFileChange = (fileListParam: any[], file: any) => {
 
 // 处理上传类型变化
 const handleUploadTypeChange = () => {
-  if (uploadForm.uploadType === 'content') {
+  if (uploadForm.uploadType !== 'file') {
     // 切换到直接输入时，设置文档类型为txt
     uploadForm.document_type = 'txt';
     // 清空文件相关数据
@@ -762,50 +777,59 @@ const handleUploadTypeChange = () => {
 
 // 上传处理
 const handleUpload = async () => {
+  if (uploadLoading.value) return false;
   try {
     // 手动验证必填字段
     if (!uploadForm.title.trim()) {
       Message.error(pageText.value.titleRequired);
-      return;
+      return false;
     }
 
     if (uploadForm.uploadType === 'file' && !uploadForm.file) {
       Message.error(pageText.value.fileRequired);
-      return;
+      return false;
     }
 
     if (uploadForm.uploadType === 'content' && (!uploadForm.content || !uploadForm.content.trim())) {
       Message.error(pageText.value.contentRequired);
-      return;
+      return false;
     }
 
     if (!uploadForm.project) {
       Message.error(pageText.value.selectProjectFirst);
-      return;
+      return false;
     }
 
     uploadLoading.value = true;
 
-    console.log('上传数据:', uploadForm); // 调试日志
+    if (uploadForm.uploadType === 'feishu') {
+      const link = uploadForm.feishu_url?.trim();
+      if (!link) {
+        Message.error(pageText.value.feishuPlaceholder);
+        return false;
+      }
+      await startImport({ project: uploadForm.project, title: uploadForm.title.trim(),
+        description: uploadForm.description, feishu_url: link });
+      return false;
+    }
 
     const response = await RequirementDocumentService.uploadDocument(uploadForm);
-
-    console.log('上传响应:', response); // 调试日志
 
     if (response.status === 'success') {
       Message.success(pageText.value.uploadSuccess);
       uploadModalVisible.value = false;
       resetUploadForm();
       loadDocuments();
+      return true;
     } else {
       Message.error(response.message || pageText.value.uploadFailed);
     }
   } catch (error) {
-    console.error('文档上传失败:', error);
-    Message.error(pageText.value.uploadFailed);
+    Message.error(error instanceof Error ? error.message : pageText.value.uploadFailed);
   } finally {
     uploadLoading.value = false;
   }
+  return false;
 };
 
 // 重置上传表单
@@ -815,9 +839,10 @@ const resetUploadForm = () => {
   Object.assign(uploadForm, {
     title: '',
     description: '',
-    document_type: 'pdf',
+    document_type: 'txt',
     project: String(currentProjectId.value || ''),
-    uploadType: 'file',
+    uploadType: 'feishu',
+    feishu_url: '',
     file: undefined,
     content: ''
   });
@@ -932,21 +957,22 @@ const deleteDocument = async (document: RequirementDocument) => {
   }
 };
 
-// 生命周期
-onMounted(() => {
-  if (currentProjectId.value) {
-    loadDocuments();
+// 项目列表可能在授权回跳后才载入。
+watch(currentProjectId, (projectId) => {
+  if (!projectId) return;
+  uploadForm.project = String(projectId);
+  if (router.currentRoute.value.query.retryFeishu === '1') {
+    const draft = getImportDraft();
+    if (draft && draft.project === String(projectId)) {
+      Object.assign(uploadForm, { title: draft.title, description: draft.description,
+        feishu_url: draft.feishu_url, uploadType: 'feishu', document_type: 'txt' });
+      uploadModalVisible.value = true;
+    }
+    clearImportDraft();
+    router.replace({ path: '/requirements' });
   }
-});
-
-// 监听项目变化
-projectStore.$subscribe((_mutation, state) => {
-  const projectId = state.currentProject?.id;
-  if (projectId && String(projectId) !== uploadForm.project) {
-    uploadForm.project = String(projectId);
-    loadDocuments();
-  }
-});
+  loadDocuments();
+}, { immediate: true });
 </script>
 
 <style scoped>

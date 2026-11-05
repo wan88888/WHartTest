@@ -31,13 +31,18 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
 class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
     """需求文档上传序列化器"""
 
+    feishu_url = serializers.CharField(max_length=2048, write_only=True, required=False)
+    feishu_code = serializers.CharField(max_length=2048, write_only=True, required=False)
+    feishu_state = serializers.CharField(max_length=128, write_only=True, required=False)
+
     SUPPORTED_EXTENSIONS = {'txt', 'md', 'pdf', 'doc', 'docx'}
 
     class Meta:
         model = RequirementDocument
         fields = [
             'id', 'title', 'description', 'document_type', 'file', 'content', 'project',
-            'status', 'word_count', 'has_images', 'image_count', 'uploaded_at'
+            'status', 'word_count', 'has_images', 'image_count', 'uploaded_at',
+            'feishu_url', 'feishu_code', 'feishu_state'
         ]
         read_only_fields = ['id', 'status', 'word_count', 'has_images', 'image_count', 'uploaded_at']
 
@@ -53,6 +58,15 @@ class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
 
     def validate(self, data):
         """验证文档内容"""
+        url = data.pop('feishu_url', None)
+        code = data.pop('feishu_code', None)
+        state = data.pop('feishu_state', None)
+        if url or code or state:
+            if not all((url, code, state)) or data.get('file') or data.get('content'):
+                raise serializers.ValidationError("请使用完整的飞书文档链接并重新授权。")
+            from .feishu_import import read_document
+            content = read_document(self.context['request'], url, code, state)
+            data.update(content=content, document_type='txt', word_count=len(content))
         if not data.get('file') and not data.get('content'):
             raise serializers.ValidationError("必须提供文件或文档内容")
         return data

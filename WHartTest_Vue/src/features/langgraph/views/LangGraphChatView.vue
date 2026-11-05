@@ -78,7 +78,11 @@
         @decision="handleToolDecision"
       />
 
-      <ChatInput
+      <a-alert v-if="modelMissing" type="info">
+        {{ isEnglish ? 'Activate a model in LLM configuration to start chatting.' : '请在模型配置中启用一个模型后开始对话。' }}
+        <router-link v-if="canViewModels" to="/llm-configs">{{ isEnglish ? 'LLM configuration' : '模型配置' }}</router-link>
+      </a-alert>
+      <ChatInput v-else
         :is-loading="isLoading || externalTaskRunning"
         :supports-vision="currentLlmConfig?.supports_vision || false"
         :context-token-count="contextTokenInfo.tokenCount"
@@ -209,6 +213,8 @@ import WeixinConnectModal from '../components/WeixinConnectModal.vue';
 import type { InterruptEvent } from '../components/ToolApprovalCard.vue';
 
 const { isEnglish } = useAppI18n();
+const auth = useAuthStore();
+const canViewModels = computed(() => ['langgraph_integration.view_llmconfig', 'llm_config.view_llmconfiguration', 'llms.view_llmmodel'].some(permission => auth.hasPermission(permission)));
 const pageText = computed(() => (
   isEnglish.value
     ? {
@@ -839,6 +845,7 @@ watch(selectedPromptId, (newValue) => {
 // 系统提示词相关
 const isSystemPromptModalVisible = ref(false);
 const isSystemPromptLoading = ref(false);
+const modelMissing = ref(false);
 const currentLlmConfig = ref<LlmRuntimeConfig | null>(null);
 const currentLlmConfigForPrompt = computed(() => {
   if (!currentLlmConfig.value?.id) {
@@ -1247,14 +1254,16 @@ const safeStopLoading = () => {
 
 // 从服务器加载会话列表
 const loadSessionsFromServer = async () => {
-  if (!projectStore.currentProjectId) {
+  const projectId = projectStore.currentProjectId;
+  if (!projectId) {
     console.log('⏳ 等待项目加载完成，暂不加载会话列表');
     return;
   }
 
   try {
     isLoading.value = true;
-    const response = await getChatSessions(projectStore.currentProjectId);
+    const response = await getChatSessions(projectId);
+    if (projectId !== projectStore.currentProjectId) return;
 
     if (response.status === 'success' && response.data) {
       // 优先使用 sessions_detail（包含标题和时间），避免 N+1 查询
@@ -2584,33 +2593,15 @@ const handleNormalMessage = async (requestData: ChatRequest, originalMessage: st
   }
 };
 
-// 监听项目变化，重新加载数据
-watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) => {
-  if (newProjectId && newProjectId !== oldProjectId) {
-    // 项目切换时清空当前状态
-    messages.value = [];
-    chatSessions.value = [];
-    sessionId.value = '';
-    localStorage.removeItem('langgraph_session_id');
-
-    // 重新加载会话列表
-    await loadSessionsFromServer();
-  }
-}, { immediate: false });
-
 // 获取当前激活的LLM配置
 const loadCurrentLlmConfig = async () => {
   try {
     const response = await getCurrentRuntimeLlmConfig('llm_chat');
-    if (response.status === 'success' && response.data) {
-      currentLlmConfig.value = response.data;
+    if (response.status === 'success') {
+      currentLlmConfig.value = response.data ?? null;
+      modelMissing.value = !response.data;
     } else {
-      currentLlmConfig.value = null;
-      Message.warning(
-        response.status === 'success'
-          ? pageText.value.noAvailableLlmConfig
-          : response.message || pageText.value.noAvailableLlmConfig
-      );
+      Message.error(response.message || pageText.value.getLlmConfigFailed);
     }
   } catch (error) {
     console.error('获取LLM配置失败:', error);
@@ -2808,26 +2799,14 @@ watch(
   { deep: true }
 );
 
-// 🔧 修复：监听项目ID变化，当项目加载完成后自动加载会话数据
 watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) => {
-  console.log(`📊 项目ID变化: ${oldProjectId} -> ${newProjectId}`);
-  
-  if (newProjectId && newProjectId !== oldProjectId) {
-    // 项目切换或首次加载完成
-    console.log('🔄 项目已切换，重新加载会话数据...');
-    
-    // 只有在onMounted完成后才通过watch加载（避免重复）
-    // 或者如果onMounted时没有项目，现在项目加载完成了，也需要加载
-    if (isMountedLoadComplete || !oldProjectId) {
-      await loadSessionsFromServer();
-      await loadChatHistory();
-    }
-  } else if (!newProjectId && oldProjectId) {
-    // 项目被清除
-    console.log('⚠️ 项目已清除');
-    messages.value = [];
-    chatSessions.value = [];
-    sessionId.value = '';
+  messages.value = [];
+  chatSessions.value = [];
+  sessionId.value = '';
+  if (oldProjectId) localStorage.removeItem('langgraph_session_id');
+  if (newProjectId) {
+    await loadSessionsFromServer();
+    if (projectStore.currentProjectId === newProjectId) await loadChatHistory();
   }
 });
 
@@ -2861,27 +2840,6 @@ onMounted(async () => {
   // 加载知识库设置
   loadKnowledgeBaseSettings();
   
-  // 🔧 修复：确保项目已选择
-  // 如果没有当前项目，等待项目store加载完成
-  if (!projectStore.currentProjectId) {
-    console.log('⏳ 等待项目初始化...');
-    // 尝试从projectStore加载项目列表
-    if (projectStore.projectList.length === 0) {
-      try {
-        await projectStore.fetchProjects();
-      } catch (error) {
-        console.error('❌ 加载项目列表失败:', error);
-      }
-    }
-    
-    // 如果还是没有项目，提示用户
-    // 注意：不直接return，因为watch会在项目加载后自动加载会话数据
-    if (!projectStore.currentProjectId) {
-      console.warn('⚠️ 没有选择项目，等待项目选择...');
-      // 不显示提示，因为MainLayout会处理项目选择
-    }
-  }
-  
   // 只有在有项目时才加载会话数据（避免watch中重复加载）
   if (projectStore.currentProjectId) {
     // 🔧 修复：先加载会话列表，再加载当前会话历史
@@ -2913,6 +2871,7 @@ watch(getRefreshTrigger(), async () => {
 }, { immediate: false });
 
 onActivated(async () => {
+  if (!isMountedLoadComplete) return;
   // 每次组件被激活时（从其他页面切回来）
   console.log('✅ Chat component activated.');
 

@@ -8,7 +8,7 @@
           <span class="logo-text">WHartTest</span>
           <img :src="brandBadgeUrl" alt="CE" class="logo-ce-icon" />
         </div>
-        <div class="project-selector" v-if="showProjectSelector">
+        <div class="project-selector" v-if="projectStore.projectOptions.length">
           <a-select
             v-model="selectedProjectId"
             :loading="projectStore.loading"
@@ -104,7 +104,7 @@
         </a-popover>
         <span v-else class="version-badge">{{ tl('当前版本:') }} {{ currentVersion }}</span>
         
-        <a-avatar class="avatar">
+        <a-avatar class="avatar" :image-url="user?.avatar_url || undefined">
           <span>{{ userInitial }}</span>
         </a-avatar>
         <a-dropdown trigger="click" class="user-dropdown-wrapper">
@@ -115,7 +115,6 @@
           <template #content>
             <div class="dropdown-user-info">
               <div class="dropdown-username">{{ username }}</div>
-              <div class="dropdown-email" v-if="user?.email">{{ user.email }}</div>
               <div class="dropdown-role" v-if="user?.is_staff">{{ tl('管理员') }}</div>
             </div>
             <a-divider style="margin: 4px 0" />
@@ -168,7 +167,7 @@
 
           <a-menu-item key="ui-automation" v-if="hasUiAutomationPermission">
             <template #icon><icon-computer /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/ui-automation')">{{ automationMenuLabel }}</a>
+            <router-link to="/ui-automation">{{ automationMenuLabel }}</router-link>
           </a-menu-item>
 
           <a-menu-item key="task-center" v-if="hasTaskCenterPermission">
@@ -189,26 +188,26 @@
             </template>
             <a-menu-item key="testcases" v-if="hasTestcasesPermission">
               <template #icon><icon-code-block /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/testcases')">{{ caseManagementMenuLabel }}</a>
+              <router-link to="/testcases">{{ caseManagementMenuLabel }}</router-link>
             </a-menu-item>
             <a-menu-item key="testsuites" v-if="hasTestSuitesPermission">
               <template #icon><icon-folder /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/testsuites')">{{ suitesMenuLabel }}</a>
+              <router-link to="/testsuites">{{ suitesMenuLabel }}</router-link>
             </a-menu-item>
             <a-menu-item key="test-executions" v-if="hasTestExecutionsPermission">
               <template #icon><icon-history /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/test-executions')">{{ executionHistoryMenuLabel }}</a>
+              <router-link to="/test-executions">{{ executionHistoryMenuLabel }}</router-link>
             </a-menu-item>
           </a-sub-menu>
 
           <a-menu-item key="langgraph-chat" v-if="hasLangGraphChatPermission">
             <template #icon><icon-message /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/langgraph-chat')">{{ chatMenuLabel }}</a>
+            <router-link to="/langgraph-chat">{{ chatMenuLabel }}</router-link>
           </a-menu-item>
 
           <a-menu-item key="knowledge-management" v-if="hasKnowledgePermission">
             <template #icon><icon-book /></template>
-            <a href="#" @click="checkProjectAndNavigate($event, '/knowledge-management')">{{ knowledgeMenuLabel }}</a>
+            <router-link to="/knowledge-management">{{ knowledgeMenuLabel }}</router-link>
           </a-menu-item>
 
           <!-- 系统管理子菜单 -->
@@ -231,7 +230,7 @@
             </a-menu-item>
             <a-menu-item key="llm-configs" v-if="hasLlmConfigsPermission">
               <template #icon><icon-tool /></template>
-              <a href="#" @click="checkProjectAndNavigate($event, '/llm-configs')">{{ modelsMenuLabel }}</a>
+              <router-link to="/llm-configs">{{ modelsMenuLabel }}</router-link>
             </a-menu-item>
             <a-menu-item key="api-keys" v-if="hasApiKeysPermission">
               <template #icon><icon-safe /></template>
@@ -271,7 +270,18 @@
       <!-- 右侧内容区域 -->
       <a-layout-content class="content">
         <router-view v-slot="{ Component }">
-          <keep-alive include="LangGraphChat">
+          <div v-if="$route.meta.requiresProject && !projectStore.currentProjectId" class="project-empty">
+            <a-spin v-if="projectStore.loading" />
+            <div v-else-if="projectStore.error">
+              <a-empty :description="projectStore.error" />
+              <a-button @click="projectStore.fetchProjects">{{ locale === 'en-US' ? 'Retry' : '重试' }}</a-button>
+            </div>
+            <div v-else>
+              <a-empty :description="locale === 'en-US' ? 'No projects available' : '暂无可用项目'" />
+              <router-link v-if="hasProjectsPermission" to="/projects">{{ projectsMenuLabel }}</router-link>
+            </div>
+          </div>
+          <keep-alive v-else include="LangGraphChat">
             <component :is="Component" />
           </keep-alive>
         </router-view>
@@ -413,7 +423,7 @@ async function checkVersion() {
 
 // 用户信息
 const user = computed(() => authStore.currentUser);
-const username = computed(() => user.value?.username || '');
+const username = computed(() => user.value?.display_name || user.value?.username || '');
 const userInitial = computed(() => {
   if (user.value?.first_name && user.value.first_name.length > 0) {
     return user.value.first_name.charAt(0).toUpperCase();
@@ -638,9 +648,7 @@ const handleLogout = () => {
   router.push('/login');
 };
 
-// 项目选择器相关
-// 在所有页面都显示项目选择器
-const showProjectSelector = computed(() => true);
+
 
 // 当前选中的项目ID
 const selectedProjectId = computed({
@@ -719,6 +727,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.project-empty { display: grid; min-height: 50vh; place-items: center; text-align: center; }
 .header {
   display: flex;
   justify-content: space-between;
@@ -1024,12 +1033,6 @@ onMounted(async () => {
   font-weight: bold;
   font-size: 13px;
   color: #333333;
-  margin-bottom: 3px;
-}
-
-.dropdown-email {
-  font-size: 11px;
-  color: #666666;
   margin-bottom: 3px;
 }
 

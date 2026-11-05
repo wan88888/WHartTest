@@ -67,7 +67,11 @@ export class RequirementDocumentService {
     formData.append('document_type', data.document_type);
     formData.append('project', data.project);
 
-    if (data.file) {
+    if (data.feishu_url && data.feishu_state && data.feishu_code) {
+      formData.append('feishu_url', data.feishu_url);
+      formData.append('feishu_state', data.feishu_state);
+      formData.append('feishu_code', data.feishu_code);
+    } else if (data.file) {
       formData.append('file', data.file);
     } else if (data.content) {
       formData.append('content', data.content);
@@ -77,6 +81,7 @@ export class RequirementDocumentService {
       url: `${BASE_URL}/documents/`,
       method: 'POST',
       data: formData,
+      withCredentials: true,
       headers: {
         'Content-Type': 'multipart/form-data'
       }

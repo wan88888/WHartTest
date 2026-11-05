@@ -108,8 +108,8 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING(f'演示项目 "{demo_project_name}" 已存在，跳过创建')
             )
-        else:
-            # 条件：演示项目不存在；动作：创建项目+Owner 成员；结果：首次部署后可直接体验业务流程。
+        elif admin_created:
+            # 条件：首次创建管理员且演示项目不存在；动作：创建项目+Owner 成员；结果：首次部署后可直接体验业务流程。
             demo_project = Project.objects.create(
                 name=demo_project_name,
                 description=(
@@ -149,7 +149,8 @@ class Command(BaseCommand):
             summary_lines.append('API Key: 已存在，本次未新建（请到后台查看或重新创建）')
         else:
             summary_lines.append(f'API Key: {default_api_key_value}')
-        summary_lines.append(f'演示项目: {demo_project_name}')
+        if demo_project:
+            summary_lines.append(f'演示项目: {demo_project_name}')
 
         self.stdout.write(
             self.style.SUCCESS(
