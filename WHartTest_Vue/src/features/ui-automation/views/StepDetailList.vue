@@ -25,7 +25,7 @@
             <a-tag v-if="!act.is_open" size="small" color="gray" style="margin-left: 4px">{{ stepText.offline }}</a-tag>
           </a-option>
         </a-select>
-        <a-button type="outline" status="success" size="small" :loading="executing" :disabled="!selectedActuator" @click="executePageStep">
+        <a-button type="outline" status="success" size="small" v-if="authStore.hasPermission('ui_automation.add_uiexecutionrecord')" :loading="executing" :disabled="!selectedActuator" @click="executePageStep">
           <template #icon><icon-play-arrow /></template>
           {{ stepText.debugRun }}
         </a-button>
@@ -462,6 +462,7 @@ import { pageStepsApi, pageStepsDetailedApi, elementApi, actuatorApi, envConfigA
 import type { UiPageStepsDetailed, UiPageSteps, UiElement, UiModule, UiPage, StepType, UiEnvironmentConfig } from '../types'
 import type { UiAuthState } from '../types'
 import { STEP_TYPE_LABELS, extractListData, extractResponseData } from '../types'
+import { useAuthStore } from '@/store/authStore'
 import { uiWebSocket, UiSocketEnum } from '../services/websocket'
 import ExecutionScreenModal from '../components/ExecutionScreenModal.vue'
 import { fileService } from '@/features/file-management/services/fileService'
@@ -1225,6 +1226,7 @@ const fetchEnvConfigs = async () => {
 }
 
 /** 执行页面步骤 */
+const authStore = useAuthStore()
 const executePageStep = async () => {
   // 防止重复执行
   if (executing.value) {
@@ -1674,6 +1676,7 @@ const onDragEnd = async () => {
 }
 
 // WebSocket 事件监听
+let offDispatchError: (() => void) | undefined
 let offStepResult: (() => void) | null = null
 let offEffectiveRuntime: (() => void) | null = null
 
@@ -1710,12 +1713,20 @@ onMounted(() => {
   fetchEnvConfigs()
   fetchEnvAuthStates()
   // 监听页面步骤执行结果
+  offDispatchError = uiWebSocket.on(UiSocketEnum.PAGE_STEPS, message => {
+    if (message.code === 200 || message.data?.func_args?.page_step_id !== props.pageStep.id) return
+    executing.value = false
+    pendingScreenPageStepId.value = null
+    execScreenVisible.value = false
+    Message.error(message.msg)
+  })
   offStepResult = uiWebSocket.on(UiSocketEnum.PAGE_STEP_RESULT, handleStepResult)
   // 监听生效运行时回执（决定是否弹执行画面）
   offEffectiveRuntime = uiWebSocket.on(UiSocketEnum.EFFECTIVE_RUNTIME, handleEffectiveRuntime)
 })
 
 onUnmounted(() => {
+  offDispatchError?.()
   offStepResult?.()
   offEffectiveRuntime?.()
 })

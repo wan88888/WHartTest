@@ -207,10 +207,10 @@ const moduleNavTreeData = computed(() => {
     : null;
   const withHit = (nodes: ModuleNode[]): ModuleNode[] =>
     nodes
-      .map((node) => {
+      .map((node): ModuleNode | null => {
         const children = node.children ? withHit(node.children) : [];
         const selfHit = !hitIds || hitIds.has(node.key) || children.length > 0;
-        return selfHit ? { ...node, children: children.length ? children : node.children } : null;
+        return selfHit ? { ...node, children } : null;
       })
       .filter((n): n is ModuleNode => n !== null);
   const tree = withHit(buildModuleTree(modules.value));

@@ -76,6 +76,7 @@ export interface AiDiagnosisResult {
   };
   healing_suggestion?: {
     can_self_heal: boolean;
+    token?: string;
     element_id?: number | null;
     element_name?: string;
     current_locator_type?: string;
@@ -1335,6 +1336,7 @@ export const applyHealingSuggestion = async (
   projectId: number,
   testCaseId: number,
   data: {
+    token: string;
     element_id?: number | null;
     element_name?: string;
     suggested_locator_type: string;

@@ -157,17 +157,54 @@ class HybridExecutionAndBindingTests(APITestCase):
         self.testcase.ui_test_case = self.ui_testcase
         self.testcase.save()
 
-        url = f"/api/projects/{self.project.id}/testcases/{self.testcase.id}/apply-healing/"
-        response = self.client.post(
-            url,
-            {
-                "element_id": self.ui_element.id,
-                "suggested_locator_type": "xpath",
-                "suggested_locator_value": "//button[text()='登录']",
-            },
-            format="json",
-        )
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        from unittest.mock import patch
+
+        record = UiExecutionRecord.objects.create(test_case=self.ui_testcase, status=3, error_message="Timeout")
+        root = f"/api/projects/{self.project.id}/testcases/{self.testcase.id}/"
+        data = {"element_id": self.ui_element.id, "suggested_locator_type": "xpath",
+                "suggested_locator_value": "//button[text()='登录']"}
+        self.assertEqual(self.client.post(root + "apply-healing/", data, format="json").status_code, 400)
+        with patch("testcases.ai_diagnosis_service._fallback_rule_diagnosis", return_value={
+            "healing_suggestion": {"can_self_heal": True, **data},
+        }):
+            report = self.client.post(root + "diagnose-failure/", {"ui_execution_record_id": record.pk}, format="json")
+        token = report.data["healing_suggestion"]["token"]
+        response = self.client.post(root + "apply-healing/", {"token": token}, format="json")
+        self.assertEqual(response.status_code, 200)
         self.ui_element.refresh_from_db()
-        self.assertEqual(self.ui_element.locator_value, "//button[text()='登录']")
+        self.assertEqual(self.ui_element.locator_value, data["suggested_locator_value"])
         self.assertEqual(self.ui_element.locator_value_2, "//button[@id='old-login-btn']")
+        self.assertEqual(self.client.post(root + "apply-healing/", {"token": token}, format="json").status_code, 400)
+
+    def test_foreign_relations_and_unbound_diagnosis_are_refused(self):
+        project = Project.objects.create(name='other')
+        module = TestCaseModule.objects.create(project=project, name='private')
+        foreign = UiTestCase.objects.create(name='private', project=project, module=UiModule.objects.create(project=project, name='ui'))
+        record = UiExecutionRecord.objects.create(test_case=foreign, error_message='private-marker')
+        root = f"/api/projects/{self.project.pk}/testcases/"
+        for fields in ({'module_id': module.pk}, {'module_id': self.module.pk, 'ui_test_case': foreign.pk}):
+            self.assertEqual(self.client.post(root, {'name': 'x', 'steps': [], **fields}, format='json').status_code, 400)
+            self.assertEqual(self.client.patch(root + f'{self.testcase.pk}/', fields, format='json').status_code, 400)
+        response = self.client.post(root + f'{self.testcase.pk}/diagnose-failure/', {'ui_execution_record_id': record.pk})
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn('private-marker', str(response.data))
+
+    def test_execution_history_rejects_generic_writes(self):
+        from testcases.models import TestSuite, TestExecution
+        suite = TestSuite.objects.create(project=self.project, name='suite', creator=self.user)
+        execution = TestExecution.objects.create(suite=suite, executor=self.user, status='completed')
+        url = f'/api/projects/{self.project.pk}/test-executions/{execution.pk}/'
+        for method in (self.client.patch, self.client.put):
+            self.assertEqual(method(url, {'status': 'running'}, format='json').status_code, 405)
+        execution.refresh_from_db()
+        self.assertEqual(execution.status, 'completed')
+
+    def test_ai_pass_requires_confirmed_steps(self):
+        from testcases.tasks import _extract_test_result_json, _reported_outcome
+        for response in ('', '未执行', '{}', '{"status":"pass"}', '{"status":"pass","steps":[]}'):
+            self.assertEqual(_reported_outcome(_extract_test_result_json(response), [1])[0], 'error')
+        report = {'status': 'pass', 'steps': [{'step_number': 1, 'status': 'pass'}]}
+        self.assertEqual(_reported_outcome(report, [1]), ('pass', ''))
+        self.assertEqual(_reported_outcome(report, [1, 2])[0], 'error')
+        report['steps'][0]['status'] = 'fail'
+        self.assertEqual(_reported_outcome(report, [1])[0], 'fail')

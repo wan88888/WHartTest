@@ -1,5 +1,8 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
+
+import { useAuthStore } from '@/store/authStore';
+import { useProjectStore } from '@/store/projectStore';
 
 export type ApiTab =
   | 'interfaces'
@@ -176,28 +179,45 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     return tabs.value.find(t => t.interfaceId === interfaceId);
   }
 
-  function saveToLocalStorage() {
+  const auth = useAuthStore();
+  const projects = useProjectStore();
+  const storageKey = computed(() => auth.user?.id && projects.currentProjectId
+    ? `${STORAGE_KEY}:${auth.user.id}:${projects.currentProjectId}` : null);
+
+  function saveToLocalStorage(key: string) {
     try {
       const data = tabs.value.map(t => ({
         ...t,
         response: undefined, // don't persist response data
         rawInterface: undefined, // don't persist rawInterface to avoid serialization failure
       }));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs: data, activeTabId: activeTabId.value }));
+      localStorage.setItem(key, JSON.stringify({ tabs: data, activeTabId: activeTabId.value }));
     } catch { /* ignore quota errors */ }
   }
 
-  function loadFromLocalStorage() {
+  function loadFromLocalStorage(key: string | null) {
+    tabs.value = [];
+    activeTabId.value = null;
+    if (!key) return;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(key);
       if (!raw) return;
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.tabs)) {
         tabs.value = parsed.tabs;
-        activeTabId.value = parsed.activeTabId ?? (tabs.value.length > 0 ? tabs.value[0].id : null);
+        activeTabId.value = tabs.value.some(tab => tab.id === parsed.activeTabId) ? parsed.activeTabId : tabs.value[0]?.id ?? null;
       }
     } catch { /* ignore parse errors */ }
   }
+
+  watch(storageKey, (key, previous) => {
+    if (previous) saveToLocalStorage(previous);
+    loadFromLocalStorage(key);
+  }, { immediate: true, flush: 'sync' });
+
+  watch([tabs, activeTabId], () => {
+    if (storageKey.value) saveToLocalStorage(storageKey.value);
+  }, { deep: true });
 
   return {
     // Top-level nav
@@ -216,7 +236,5 @@ export const useApiTabsStore = defineStore('apiTabs', () => {
     updateTabResponse,
     updateTabUIState,
     findTabByInterface,
-    saveToLocalStorage,
-    loadFromLocalStorage,
   };
 });

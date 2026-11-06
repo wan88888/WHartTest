@@ -318,9 +318,9 @@ class UiWebSocketService {
   }
   
   /** 停止执行 */
-  stopExecution(taskId?: string): boolean {
+  stopExecution(taskId?: string, kind: 'case' | 'page' = 'case'): boolean {
     return this.send(UiSocketEnum.STOP_EXECUTION, {
-      task_id: taskId,
+      task_id: taskId, kind,
     })
   }
 

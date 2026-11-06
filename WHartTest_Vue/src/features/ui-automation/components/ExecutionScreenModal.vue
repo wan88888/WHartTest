@@ -179,8 +179,8 @@ watch(
     } else if (startedExec.value) {
       // 关闭画布即中断该用例执行（u_stop_execution 携带 case_id 精确停止；
       // 不带目标会广播到全部执行器，误杀同执行器上正在运行的其他任务）
-      if (!finished.value) {
-        uiWebSocket.stopExecution(props.taskId != null ? String(props.taskId) : undefined)
+      if (!finished.value && props.taskId != null) {
+        uiWebSocket.stopExecution(String(props.taskId), props.mode === 'case' ? 'case' : 'page')
       }
       startedExec.value = false
     }

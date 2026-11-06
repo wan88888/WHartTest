@@ -81,7 +81,7 @@
         </a-table-column>
         <a-table-column :title="pageText.operations" :width="90" fixed="right" align="center">
           <template #cell="{ record }">
-            <a-button type="text" size="mini" @click="openEdit(record)">
+            <a-button v-if="authStore.hasPermission('ui_automation.manage_actuators')" type="text" size="mini" @click="openEdit(record)">
               <template #icon><icon-edit /></template>
               {{ pageText.edit }}
             </a-button>
@@ -210,12 +210,14 @@ import { IconRefresh, IconEdit } from '@arco-design/web-vue/es/icon'
 import { Message } from '@arco-design/web-vue'
 import type { FormInstance } from '@arco-design/web-vue'
 import { useAppI18n } from '@/composables/useAppI18n'
+import { useAuthStore } from '@/store/authStore'
 import { actuatorApi, type ActuatorInfo, type ActuatorConfigPayload } from '../api'
 import { extractResponseData } from '../types'
 
 void IconRefresh
 void IconEdit
 
+const authStore = useAuthStore()
 const { locale, isEnglish } = useAppI18n()
 
 const pageText = computed(() => (

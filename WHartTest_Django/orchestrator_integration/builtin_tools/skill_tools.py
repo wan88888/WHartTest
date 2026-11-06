@@ -777,6 +777,7 @@ def _cleanup_stale_ui_auth_state_files(runtime_dir: str, keep_path: Optional[str
 def _prepare_ui_auth_state_file(
     ui_credential_context: dict,
     user_id: object,
+    project_id: object,
     chat_session_id: object,
 ) -> Optional[str]:
     """把 UI 生成会话的登录态 storageState 落为 0600 临时文件，返回路径。
@@ -791,11 +792,14 @@ def _prepare_ui_auth_state_file(
         return None
 
     try:
+        from ui_automation.access import EXECUTE, current_user, require_project
         from ui_automation.models import UiAuthState
+
+        require_project(current_user(user_id), project_id, EXECUTE)
 
         auth_state = (
             UiAuthState.objects.select_related("env_config")
-            .filter(id=auth_state_id, is_active=True)
+            .filter(id=auth_state_id, is_active=True, env_config__project_id=project_id)
             .first()
         )
         if not auth_state or not auth_state.state_json:
@@ -911,13 +915,6 @@ def get_skill_tools(
     current_ui_credential_context = dict(ui_credential_context) if ui_credential_context else None
     current_ui_auth_state_file: Optional[str] = None
 
-    if current_ui_credential_context:
-        state_file = _prepare_ui_auth_state_file(
-            current_ui_credential_context, current_user_id, current_chat_session_id
-        )
-        if state_file:
-            current_ui_auth_state_file = state_file
-
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
         """
@@ -1023,10 +1020,10 @@ def get_skill_tools(
 
             # UI 生成会话凭据注入（仅 env 传递，不进 LLM 上下文）
             current_ui_auth_state_file = None
-            if current_ui_credential_context:
+            if current_ui_credential_context and skill_name in _PLAYWRIGHT_SKILL_NAMES:
                 current_ui_auth_state_file = _prepare_ui_auth_state_file(
                     current_ui_credential_context,
-                    current_user_id,
+                    current_user_id, current_project_id,
                     current_chat_session_id,
                 )
                 _apply_ui_credential_env(runtime_env, current_ui_credential_context, current_ui_auth_state_file)

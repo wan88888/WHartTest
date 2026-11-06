@@ -141,8 +141,11 @@
             <span>{{ document?.uploader_name }}</span>
           </div>
           <div class="info-item">
-            <span class="label">{{ pageText.uploadedAt }}:</span>
+            <span class="label">{{ document?.feishu_url ? pageText.importedAt : pageText.uploadedAt }}:</span>
             <span>{{ formatDateTime(document?.uploaded_at) }}</span>
+          </div>
+          <div v-if="document?.feishu_url" class="info-item">
+            <a :href="document.feishu_url" target="_blank" rel="noopener noreferrer">{{ pageText.openFeishuSource }}</a>
           </div>
           <div class="info-item">
             <span class="label">{{ pageText.updatedAt }}:</span>
@@ -214,7 +217,7 @@
         </template>
         <div
           class="segment-content markdown-body latest-document-content"
-          v-html="renderMarkdownWithImages(document?.content || '')"
+          v-requirement-html="renderMarkdownWithImages(document?.content || '')"
         />
       </a-card>
     </div>
@@ -334,7 +337,7 @@
                   borderLeft: `4px solid ${getModuleColor(index)}`,
                   backgroundColor: selectedModules.includes(module.id) ? getModuleColor(index, 0.1) : 'white'
                 }"
-                v-html="renderMarkdownWithImages(module.content)"
+                v-requirement-html="renderMarkdownWithImages(module.content)"
               />
               <div v-else class="segment-collapsed-placeholder">
                 {{ pageText.expandModuleHint }}
@@ -473,6 +476,7 @@
 </template>
 
 <script setup lang="ts">
+import { vRequirementHtml } from '@/features/requirements/services/requirementHtml';
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, h, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message, Modal, Input as AInput } from '@arco-design/web-vue';
@@ -547,6 +551,8 @@ const pageText = computed(() => (
         images: 'Images',
         uploadedBy: 'Uploaded by',
         uploadedAt: 'Uploaded at',
+        importedAt: 'Imported at',
+        openFeishuSource: 'Open in Feishu',
         updatedAt: 'Updated at',
         description: 'Description',
         splitFirstTitle: 'Split the document first',
@@ -657,6 +663,8 @@ const pageText = computed(() => (
         images: '图片',
         uploadedBy: '上传者',
         uploadedAt: '上传时间',
+        importedAt: '导入时间',
+        openFeishuSource: '打开飞书原文',
         updatedAt: '更新时间',
         description: '描述',
         splitFirstTitle: '请先进行拆分',
@@ -973,21 +981,18 @@ const renderMarkdownWithImages = (content: string): string => {
     /!\[(.*?)\]\(docimg:\/\/([^)]+)\)/g,
     (_match, alt, imageId) => {
       const imageUrl = `/api/requirements/documents/${document.value?.id}/images/${imageId}/`;
-      console.log('[Debug] 图片URL替换:', imageId, '->', imageUrl);
       return `![${alt}](${imageUrl})`;
     }
   );
 
   // 渲染 Markdown
   const rawHtml = marked.parse(withImageUrls, { async: false }) as string;
-  console.log('[Debug] Markdown渲染结果:', rawHtml.substring(0, 500));
 
   // 使用 DOMPurify 清理 HTML 防止 XSS
   const sanitized = DOMPurify.sanitize(rawHtml, {
     ADD_TAGS: ['img'],
     ADD_ATTR: ['src', 'alt', 'title']
   });
-  console.log('[Debug] DOMPurify处理后:', sanitized.substring(0, 500));
   return sanitized;
 };
 

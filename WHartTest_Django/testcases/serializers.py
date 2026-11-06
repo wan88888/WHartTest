@@ -43,9 +43,17 @@ class TestCaseStepSerializer(serializers.ModelSerializer):
 class UiTestCaseDetailMixin:
     """提供统一的 UI 自动化用例摘要序列化方法"""
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if instance.module_id and instance.module.project_id != instance.project_id:
+            data.update(module_id=None, module_detail=None)
+        if instance.ui_test_case_id and instance.ui_test_case.project_id != instance.project_id:
+            data.update(ui_test_case=None, ui_test_case_detail=None)
+        return data
+
     def get_ui_test_case_detail(self, obj):
         """获取绑定的UI自动化用例摘要"""
-        if not obj.ui_test_case_id:
+        if not obj.ui_test_case_id or obj.ui_test_case.project_id != obj.project_id:
             return None
         ui_tc = obj.ui_test_case
         return {
@@ -160,6 +168,15 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
 
         # 为了简单起见，我们先将其保留在 fields 中，视图将负责处理其赋值。
 
+    def get_fields(self):
+        fields = super().get_fields()
+        view = self.context.get('view')
+        project_id = getattr(view, 'kwargs', {}).get('project_pk')
+        if project_id:
+            for name in ('module_id', 'ui_test_case'):
+                fields[name].queryset = fields[name].queryset.filter(project_id=project_id)
+        return fields
+
     def validate(self, attrs):
         """验证数据"""
         # 创建时必须选择模块
@@ -170,12 +187,12 @@ class TestCaseSerializer(UiTestCaseDetailMixin, serializers.ModelSerializer):
         if self.instance and "module" in attrs and attrs["module"] is None:
             raise serializers.ValidationError({"module_id": "请选择所属模块"})
 
-        # 校验绑定的 UI 测试用例必须属于当前项目
-        ui_test_case = attrs.get("ui_test_case")
-        if ui_test_case is not None:
-            project = self.instance.project if self.instance else attrs.get("project")
-            if project and ui_test_case.project_id != project.id:
-                raise serializers.ValidationError({"ui_test_case": "绑定的 UI 自动化用例不属于当前项目"})
+        view = self.context.get("view")
+        project_id = self.instance.project_id if self.instance else getattr(view, "kwargs", {}).get("project_pk")
+        for field, label in (("module", "module_id"), ("ui_test_case", "ui_test_case")):
+            relation = attrs.get(field)
+            if relation and str(relation.project_id) != str(project_id):
+                raise serializers.ValidationError({label: "所选资源必须属于当前项目"})
 
         return attrs
 

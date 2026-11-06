@@ -30,6 +30,7 @@ export interface ProjectCredential {
 
 // 项目类型定义
 export interface Project {
+  current_user_role?: ProjectMember['role'] | null;
   id: number;
   name: string;
   description: string;
@@ -52,7 +53,8 @@ export interface CreateProjectRequest {
 export interface UpdateProjectRequest {
   name?: string;
   description?: string;
-  credentials?: ProjectCredential[];
+  credentials?: Partial<ProjectCredential>[];
+  removed_credential_ids?: number[];
 }
 
 // 分页参数

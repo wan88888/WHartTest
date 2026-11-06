@@ -1,6 +1,6 @@
 <template>
   <div ref="layoutRef" class="ui-automation-layout">
-    <ModulePanel ref="modulePanelRef" @select="onModuleSelect" @updated="onModuleUpdated" />
+    <ModulePanel :key="projectStore.currentProjectId ?? undefined" ref="modulePanelRef" @select="onModuleSelect" @updated="onModuleUpdated" />
     <div class="layout-content">
       <a-tooltip :content="isFullscreen ? tl('退出全屏') : tl('全屏')">
         <button class="fullscreen-btn" type="button" @click="toggleFullscreen">
@@ -9,7 +9,7 @@
         </button>
       </a-tooltip>
       <a-tabs
-        :key="`ui-automation-tabs-${locale}`"
+        :key="`ui-automation-tabs-${locale}-${projectStore.currentProjectId}`"
         v-model:active-key="activeTab"
         type="card-gutter"
         class="layout-tabs"
@@ -86,6 +86,10 @@ const activeTab = ref('pages')
 const modulePanelRef = ref()
 const selectedModuleId = ref<number | undefined>(undefined)
 
+watch(() => projectStore.currentProjectId, () => {
+  selectedModuleId.value = undefined
+  showGenerateModal.value = false
+})
 const pageListRef = ref()
 const pageStepListRef = ref()
 const testCaseListRef = ref()

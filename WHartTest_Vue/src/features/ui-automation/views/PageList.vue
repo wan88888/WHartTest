@@ -23,7 +23,7 @@
         />
       </div>
       <div class="action-buttons">
-        <a-button type="primary" @click="showAddModal">
+        <a-button type="primary" v-if="authStore.hasPermission('ui_automation.add_uipage')" @click="showAddModal">
           <template #icon><icon-plus /></template>
           新增页面
         </a-button>
@@ -56,19 +56,19 @@
       </template>
       <template #operations="{ record }">
         <a-space :size="4">
-          <a-button type="text" size="mini" @click="viewElements(record)">
+          <a-button type="text" size="mini" v-if="authStore.hasPermission('ui_automation.view_uielement')" @click="viewElements(record)">
             <template #icon><icon-eye /></template>
             元素
           </a-button>
-          <a-button type="text" size="mini" @click="editPage(record)">
+          <a-button type="text" size="mini" v-if="authStore.hasPermission('ui_automation.change_uipage')" @click="editPage(record)">
             <template #icon><icon-edit /></template>
             编辑
           </a-button>
-          <a-button type="text" size="mini" @click="copyPage(record)">
+          <a-button type="text" size="mini" v-if="authStore.hasPermission('ui_automation.add_uipage')" @click="copyPage(record)">
             <template #icon><icon-copy /></template>
             复制
           </a-button>
-          <a-popconfirm
+          <a-popconfirm v-if="authStore.hasPermission('ui_automation.delete_uipage')"
             content="确定删除该页面？若页面下存在步骤或元素被步骤引用，将无法删除。"
             @ok="deletePage(record)"
           >
@@ -127,6 +127,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { Message } from '@arco-design/web-vue'
 import { IconPlus, IconEdit, IconDelete, IconEye, IconCopy } from '@arco-design/web-vue/es/icon'
+import { useAuthStore } from '@/store/authStore';
 import { useProjectStore } from '@/store/projectStore'
 import { pageApi, moduleApi } from '../api'
 import type { UiPage, UiPageForm, UiModule } from '../types'
@@ -137,6 +138,7 @@ const props = defineProps<{
   selectedModuleId?: number
 }>()
 
+const authStore = useAuthStore()
 const projectStore = useProjectStore()
 const projectId = computed(() => projectStore.currentProject?.id)
 
@@ -331,6 +333,7 @@ const copyPage = async (record: UiPage) => {
 }
 
 const deletePage = async (record: UiPage) => {
+  if (record.project !== projectId.value) return
   try {
     await pageApi.delete(record.id)
     Message.success('删除成功')

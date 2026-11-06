@@ -1,8 +1,3 @@
-import os
-import tempfile
-import logging
-import importlib.util
-
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.decorators import action
@@ -20,7 +15,7 @@ from wharttest_django.pagination import StandardPagination
 from .models import ApiCustomFunction
 from .serializers import ApiCustomFunctionSerializer
 
-logger = logging.getLogger(__name__)
+from .runtime import call_function, SandboxUnavailable
 
 
 class ApiCustomFunctionViewSet(BaseModelViewSet):
@@ -81,44 +76,14 @@ class ApiCustomFunctionViewSet(BaseModelViewSet):
         code = request.data.get('code')
         test_args = request.data.get('test_args', {})
 
-        if not code:
-            return Response(
-                {'detail': 'The "code" field is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        logger.info("Attempting to execute custom function with test_args: %s", test_args)
-
-        temp_file = None
+        if not isinstance(code, str) or not code.strip() or len(code) > 10000:
+            return Response({'detail': 'code 需包含 1 至 10000 个字符。'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(test_args, dict):
+            return Response({'detail': 'test_args 需为 JSON 对象。'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.py', delete=False
-            ) as f:
-                f.write(code)
-                temp_file = f.name
-
-            spec = importlib.util.spec_from_file_location("temp_module", temp_file)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-
-            func_name = code.split('def ')[1].split('(')[0].strip()
-            func = getattr(module, func_name)
-
-            result = func(**test_args) if test_args else func()
-
-            logger.info("Successfully executed custom function %s.", func_name)
-            return Response({'result': str(result)})
-
-        except Exception as e:
-            logger.exception(
-                "Failed to execute custom function.\nCode:\n%s\ntest_args: %s",
-                code,
-                test_args,
-            )
-            return Response(
-                {'detail': str(e)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        finally:
-            if temp_file and os.path.exists(temp_file):
-                os.unlink(temp_file)
+            result = call_function(code, None, (), test_args, display=True)
+        except SandboxUnavailable as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'result': result})

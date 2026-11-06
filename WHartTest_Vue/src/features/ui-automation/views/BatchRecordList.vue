@@ -61,7 +61,7 @@
             <template #icon><icon-eye /></template>
             详情
           </a-button>
-          <a-popconfirm content="确定删除此批量执行记录？关联的执行记录将一并删除。" @ok="handleDelete(record.id)">
+          <a-popconfirm v-if="canDeleteBatch" content="确定删除此批量执行记录？关联的执行记录将一并删除。" @ok="handleDelete(record.id)">
             <a-button type="text" size="mini" status="danger">
               <template #icon><icon-delete /></template>
               删除
@@ -101,8 +101,9 @@
         </a-descriptions>
 
         <!-- 关联的执行记录列表 -->
-        <a-divider>用例执行结果</a-divider>
+        <a-divider v-if="currentRecord.execution_records">用例执行结果</a-divider>
         <a-table
+          v-if="currentRecord.execution_records"
           :columns="detailColumns"
           :data="currentRecord.execution_records ?? []"
           :pagination="false"
@@ -142,7 +143,7 @@
                     {{ step.duration?.toFixed(2) ?? '-' }}s
                   </template>
                   <template #step_screenshot="{ record: step }">
-                    <a-image
+                    <ExecutionScreenshot
                       v-if="step.screenshot"
                       :src="step.screenshot"
                       width="60"
@@ -170,6 +171,7 @@
 </template>
 
 <script setup lang="ts">
+import ExecutionScreenshot from '../components/ExecutionScreenshot.vue'
 import { ref, reactive, computed, watch } from 'vue'
 import { IconRefresh, IconEye, IconDelete } from '@arco-design/web-vue/es/icon'
 import { Message } from '@arco-design/web-vue'
@@ -177,8 +179,12 @@ import { batchRecordApi } from '../api'
 import type { UiBatchExecutionRecord, BatchExecutionStatus, ExecutionStatus } from '../types'
 import { BATCH_STATUS_LABELS, STATUS_LABELS, extractPaginationData, extractResponseData } from '../types'
 import { useProjectStore } from '@/store/projectStore'
+import { useAuthStore } from '@/store/authStore'
 
 const projectStore = useProjectStore()
+const authStore = useAuthStore()
+const canDeleteBatch = computed(() => authStore.hasPermission('ui_automation.delete_uibatchexecutionrecord')
+  && authStore.hasPermission('ui_automation.delete_uiexecutionrecord'))
 const projectId = computed(() => projectStore.currentProject?.id)
 
 const loading = ref(false)

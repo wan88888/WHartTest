@@ -4,6 +4,8 @@
  */
 
 import { ref, computed } from 'vue';
+import { useAuthStore } from '@/store/authStore';
+import { useProjectStore } from '@/store/projectStore';
 import type { AiDiagnosisResult } from '@/services/testcaseService';
 
 export interface ExecutionTaskLog {
@@ -32,9 +34,18 @@ export interface ExecutionTask {
 }
 
 // 单例响应式状态
-const tasks = ref<ExecutionTask[]>([]);
+const allTasks = ref<(ExecutionTask & { projectId: number; userId: number })[]>([]);
+
+export function resetExecutionQueue() {
+  allTasks.value = [];
+}
 
 export function useTestCaseExecutionQueue() {
+  const projects = useProjectStore();
+  const auth = useAuthStore();
+  const isCurrentScope = (task: typeof allTasks.value[number]) =>
+    task.userId === auth.user?.id && task.projectId === projects.currentProjectId;
+  const tasks = computed(() => allTasks.value.filter(isCurrentScope));
   const runningTasksCount = computed(() => {
     return tasks.value.filter(t => t.status === 'running' || t.status === 'diagnosing' || t.status === 'pending').length;
   });
@@ -65,12 +76,13 @@ export function useTestCaseExecutionQueue() {
         },
       ],
     };
-    tasks.value.unshift(newTask);
+    if (!auth.user || !projects.currentProjectId) throw new Error('执行任务需要登录并选择项目');
+    allTasks.value.unshift({ ...newTask, projectId: projects.currentProjectId, userId: auth.user.id });
     return newTask;
   };
 
   const updateTask = (taskId: string, patch: Partial<ExecutionTask>) => {
-    const task = tasks.value.find(t => t.id === taskId);
+    const task = allTasks.value.find(t => t.id === taskId);
     if (task) {
       Object.assign(task, patch);
       if (patch.status === 'success' || patch.status === 'failed') {
@@ -83,7 +95,7 @@ export function useTestCaseExecutionQueue() {
   };
 
   const addStepLog = (taskId: string, message: string, type: ExecutionTaskLog['type'] = 'info') => {
-    const task = tasks.value.find(t => t.id === taskId);
+    const task = allTasks.value.find(t => t.id === taskId);
     if (task) {
       const timeStr = new Date().toLocaleTimeString();
       task.logs.push({ time: timeStr, message, type });
@@ -96,7 +108,7 @@ export function useTestCaseExecutionQueue() {
     errorMessage?: string,
     aiDiagnosis?: AiDiagnosisResult | null
   ) => {
-    const task = tasks.value.find(t => t.id === taskId);
+    const task = allTasks.value.find(t => t.id === taskId);
     if (task) {
       const now = Date.now();
       task.status = status;
@@ -117,14 +129,14 @@ export function useTestCaseExecutionQueue() {
   };
 
   const removeTask = (taskId: string) => {
-    const index = tasks.value.findIndex(t => t.id === taskId);
+    const index = allTasks.value.findIndex(t => t.id === taskId);
     if (index > -1) {
-      tasks.value.splice(index, 1);
+      allTasks.value.splice(index, 1);
     }
   };
 
   const clearCompletedTasks = () => {
-    tasks.value = tasks.value.filter(t => t.status === 'running' || t.status === 'diagnosing' || t.status === 'pending');
+    allTasks.value = allTasks.value.filter(t => !isCurrentScope(t) || t.status === 'running' || t.status === 'diagnosing' || t.status === 'pending');
   };
 
   const getTaskByTestCaseId = (testCaseId: number) => {

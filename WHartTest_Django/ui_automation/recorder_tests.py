@@ -612,9 +612,7 @@ class RecorderLoginInjectTests(TestCase):
         from ui_automation.recorder.session_manager import RecorderSessionMeta
         from ui_automation.models import UiEnvironmentConfig
 
-        env = UiEnvironmentConfig.objects.create(
-            project=self.project, name='环境A', base_url='http://env.local', creator=self.user,
-        )
+        env = self.env
         # 环境存在启用中的登录态：新语义下未显式绑定也绝不注入
         UiAuthState.objects.create(
             env_config=env, is_active=True, name='环境生效登录态',
@@ -703,7 +701,7 @@ class RecorderBrowserExecTests(TestCase):
     def setUp(self):
         from asgiref.sync import async_to_sync
         self._run = async_to_sync
-        self.user = User.objects.create_superuser(username='rec-exec', password='secret')
+        self.user = User.objects.create_superuser(username='alice', password='secret')
         self.project = Project.objects.create(name='Recorder Exec Project')
         ProjectMember.objects.create(project=self.project, user=self.user, role='admin')
         self.module = UiModule.objects.create(project=self.project, name='M', creator=self.user)
@@ -724,6 +722,10 @@ class RecorderBrowserExecTests(TestCase):
         )
         from ui_automation.models import UiCaseStepsDetailed
         UiCaseStepsDetailed.objects.create(test_case=self.case, page_step=self.page_step, case_sort=0)
+
+    async def _dispatch(self, consumer, kind, args, user='alice'):
+        from ui_automation.socket_models import QueueModel, SocketDataModel
+        await consumer.route_message(SocketDataModel(user=user, data=QueueModel(func_name=kind, func_args=args)))
 
     def _consumer_env(self):
         from unittest.mock import patch
@@ -769,6 +771,8 @@ class RecorderBrowserExecTests(TestCase):
         self.addCleanup(skill_patch.stop)
 
         consumer = UiAutomationConsumer()
+        consumer.scope = {"user": self.user}
+        consumer.user_id = self.user.username
 
         async def capture_send_json(data):
             received.append(data)
@@ -789,7 +793,7 @@ class RecorderBrowserExecTests(TestCase):
     def test_page_steps_exec_via_recorder(self):
         consumer, session, received, _layer = self._consumer_env()
         async def scenario():
-            await consumer.handle_execute_page_steps({'page_step_id': self.page_step.id, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'}, 'alice')
+            await self._dispatch(consumer, 'u_page_steps', {'page_step_id': self.page_step.id, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'}, 'alice')
             if consumer._recorder_exec_task is not None:
                 await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
         self._run(scenario)()
@@ -818,7 +822,7 @@ class RecorderBrowserExecTests(TestCase):
         from ui_automation.models import UiExecutionRecord
         consumer, session, received, layer = self._consumer_env()
         async def scenario():
-            await consumer.handle_execute_test_case({
+            await self._dispatch(consumer, 'u_test_case', {
                 'case_id': self.case.id,
                 'env_config_id': self.env.id,
                 'actuator_id': 'recorder-browser',
@@ -848,10 +852,10 @@ class RecorderBrowserExecTests(TestCase):
         from ui_automation.models import UiCaseStepsDetailed, UiAuthState, UiTestCase
         env_a = self.env
         auth_a = UiAuthState.objects.create(
-            env_config=env_a, name='登录态A', state_json={'cookies': [{'name': 'A'}]}, creator=self.user,
+            env_config=env_a, name='登录态A', state_json={'cookies': [{'name': 'A', 'value': 'a'}]}, creator=self.user,
         )
         auth_b = UiAuthState.objects.create(
-            env_config=env_a, name='登录态B', state_json={'cookies': [{'name': 'B'}]}, creator=self.user,
+            env_config=env_a, name='登录态B', state_json={'cookies': [{'name': 'B', 'value': 'b'}]}, creator=self.user,
         )
         # 独立用例（不复用 setUp 的 self.case）：4 个页面步骤 1绑A、2未绑、3绑B、4未绑
         case = UiTestCase.objects.create(
@@ -870,7 +874,7 @@ class RecorderBrowserExecTests(TestCase):
         consumer, session, received, layer = self._consumer_env()
 
         async def scenario():
-            await consumer.handle_execute_test_case(
+            await self._dispatch(consumer, 'u_test_case',
                 {'case_id': case.id, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'},
                 'alice',
             )
@@ -881,7 +885,7 @@ class RecorderBrowserExecTests(TestCase):
         switches = [(p.get('storage_state') or {}).get('cookies') for m, p in session.requests if m == 'switch_context']
         # 仅第 3 步触发一次切换，且注入的是登录态 B
         self.assertEqual(len(switches), 1)
-        self.assertEqual(switches[0], [{'name': 'B'}])
+        self.assertEqual(switches[0], [{'name': 'B', 'value': 'b'}])
         # 4 组全部执行成功；首组不拼 goto（start 已导航），后续组保持每组 goto
         run_calls = [p for m, p in session.requests if m == 'run_steps']
         self.assertEqual(len(run_calls), 4)
@@ -896,7 +900,7 @@ class RecorderBrowserExecTests(TestCase):
         consumer, session, received, layer = self._consumer_env()
 
         async def scenario():
-            await consumer.handle_execute_test_case(
+            await self._dispatch(consumer, 'u_test_case',
                 {'case_id': self.case.id, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'},
                 'alice',
             )
@@ -913,7 +917,7 @@ class RecorderBrowserExecTests(TestCase):
         同样不重复拼接 goto——重复导航会打断 SSO 重定向链。"""
         from ui_automation.models import UiCaseStepsDetailed, UiAuthState, UiTestCase
         auth_a = UiAuthState.objects.create(
-            env_config=self.env, name='登录态A', state_json={'cookies': [{'name': 'A'}]}, creator=self.user,
+            env_config=self.env, name='登录态A', state_json={'cookies': [{'name': 'A', 'value': 'a'}]}, creator=self.user,
         )
         case = UiTestCase.objects.create(
             project=self.project, module=self.module, name='首组绑定登录态用例', creator=self.user,
@@ -928,7 +932,7 @@ class RecorderBrowserExecTests(TestCase):
         consumer, session, received, layer = self._consumer_env()
 
         async def scenario():
-            await consumer.handle_execute_test_case(
+            await self._dispatch(consumer, 'u_test_case',
                 {'case_id': case.id, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'},
                 'alice',
             )
@@ -943,7 +947,7 @@ class RecorderBrowserExecTests(TestCase):
         self.assertEqual(len(start_params), 1)
         self.assertEqual(
             (start_params[0].get('storage_state') or {}).get('cookies'),
-            [{'name': 'A'}],
+            [{'name': 'A', 'value': 'a'}],
         )
         # start 负责导航到首组地址（与执行器先 goto 再执行步骤同语义）
         self.assertEqual(start_params[0].get('url'), 'http://env.local')
@@ -957,16 +961,14 @@ class RecorderBrowserExecTests(TestCase):
     def test_page_steps_recorder_error_reports_failed(self):
         consumer, session, received, _layer = self._consumer_env()
         async def scenario():
-            await consumer.handle_execute_page_steps({'page_step_id': 999999, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'}, 'alice')
+            await self._dispatch(consumer, 'u_page_steps', {'page_step_id': 999999, 'env_config_id': self.env.id, 'actuator_id': 'recorder-browser'}, 'alice')
             if consumer._recorder_exec_task is not None:
                 await asyncio.wait_for(consumer._recorder_exec_task, timeout=15)
         self._run(scenario)()
-        # 执行已改为独立任务：等待其完成（结果回传后再断言）
-        if consumer._recorder_exec_task is not None:
-            self._run(lambda: consumer._recorder_exec_task)()
-        msg = received[-1]
-        self.assertEqual(msg.data.func_name, 'u_page_step_result')
-        self.assertEqual(msg.data.func_args['status'], 'failed')
+        self.assertIsNone(consumer._recorder_exec_task)
+        self.assertFalse(session.requests)
+        self.assertEqual(received[-1].code, 400)
+        self.assertEqual(received[-1].data.func_args['page_step_id'], 999999)
 
     def test_close_canvas_interrupts_recorder_exec(self):
         import threading
@@ -1007,6 +1009,8 @@ class RecorderBrowserExecTests(TestCase):
 
         SocketUserManager._web_users['alice'] = FakeWebUser()
         consumer = UiAutomationConsumer()
+        consumer.scope = {"user": self.user}
+        consumer.user_id = self.user.username
 
         async def _noop_send(**kwargs):
             pass
@@ -1014,14 +1018,14 @@ class RecorderBrowserExecTests(TestCase):
         consumer.send = _noop_send  # 单测桩：stop 回执走 send_json → send
 
         async def scenario():
-            task = asyncio.ensure_future(consumer.handle_execute_page_steps(
+            task = asyncio.ensure_future(self._dispatch(consumer, 'u_page_steps',
                 {'page_step_id': self.page_step.id, 'env_config_id': self.env.id,
                  'actuator_id': 'recorder-browser'},
                 'alice',
             ))
             await asyncio.sleep(0.05)
             # 前端关闭执行画布 → u_stop_execution
-            await consumer.handle_stop_execution({}, 'alice')
+            await consumer.handle_stop_execution({'kind': 'page', 'task_id': self.page_step.id}, 'alice')
             if consumer._recorder_exec_task is not None:
                 await asyncio.wait_for(consumer._recorder_exec_task, timeout=3)
             # 中断后不再产生新的执行结果消息

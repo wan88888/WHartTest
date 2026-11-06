@@ -26,7 +26,7 @@
           />
         </div>
         <div class="action-buttons">
-          <a-button type="primary" @click="showAddProjectModal">{{ pageText.addProject }}</a-button>
+          <a-button type="primary" v-if="authStore.hasPermission('projects.add_project')" @click="showAddProjectModal">{{ pageText.addProject }}</a-button>
         </div>
       </div>
 
@@ -53,9 +53,9 @@
         </template>
         <template #operations="{ record }">
           <a-space class="project-operations" :size="[4, 4]">
-            <a-button type="primary" size="mini" @click="viewProjectMembers(record, $event)">{{ pageText.members }}</a-button>
-            <a-button type="primary" size="mini" @click="editProject(record, $event)">{{ pageText.edit }}</a-button>
-            <a-button type="primary" status="danger" size="mini" @click="deleteProject(record, $event)">{{ pageText.delete }}</a-button>
+            <a-button type="primary" size="mini" v-if="authStore.hasPermission('projects.view_projectmember')" @click="viewProjectMembers(record, $event)">{{ pageText.members }}</a-button>
+            <a-button type="primary" size="mini" v-if="authStore.hasPermission('projects.change_project') && (authStore.user?.is_superuser || ['owner', 'admin'].includes(record.current_user_role))" @click="editProject(record, $event)">{{ pageText.edit }}</a-button>
+            <a-button type="primary" status="danger" size="mini" v-if="authStore.hasPermission('projects.delete_project') && (authStore.user?.is_superuser || record.current_user_role === 'owner')" @click="deleteProject(record, $event)">{{ pageText.delete }}</a-button>
           </a-space>
         </template>
         <template #empty>
@@ -77,7 +77,7 @@
       </div>
       <div v-else>
         <div class="members-header">
-          <a-button type="primary" @click="showAddMemberModal">{{ pageText.addMember }}</a-button>
+          <a-button type="primary" v-if="canManageMembers && authStore.hasPermission('projects.add_projectmember')" @click="showAddMemberModal">{{ pageText.addMember }}</a-button>
         </div>
         <div v-if="projectMembers.length === 0" class="no-data">
           {{ pageText.noMembersData }}
@@ -104,8 +104,8 @@
               <a-button
                 type="text"
                 size="mini"
-                @click="showUpdateRoleModal(record)"
-                :disabled="record.role === 'owner'"
+                v-if="canManageMembers && authStore.hasPermission('projects.change_projectmember')" @click="showUpdateRoleModal(record)"
+                :disabled="record.role === 'owner' || (!authStore.user?.is_superuser && record.user === authStore.user?.id)"
               >
                 {{ pageText.updateRole }}
               </a-button>
@@ -113,8 +113,8 @@
                 type="text"
                 size="mini"
                 status="danger"
-                @click="removeMember(record)"
-                :disabled="record.role === 'owner'"
+                v-if="canManageMembers && authStore.hasPermission('projects.delete_projectmember')" @click="removeMember(record)"
+                :disabled="record.role === 'owner' || (!authStore.user?.is_superuser && record.user === authStore.user?.id)"
               >
                 {{ pageText.remove }}
               </a-button>
@@ -155,7 +155,7 @@
           <a-select v-model="addMemberForm.role" :placeholder="pageText.selectRolePlaceholder">
             <a-option value="member">{{ pageText.memberRole }}</a-option>
             <a-option value="admin">{{ pageText.adminRole }}</a-option>
-            <a-option value="owner">{{ pageText.ownerRole }}</a-option>
+            <a-option v-if="canTransferOwner" value="owner">{{ pageText.ownerRole }}</a-option>
           </a-select>
         </a-form-item>
       </a-form>
@@ -176,7 +176,7 @@
           <a-select v-model="updateRoleForm.role" :placeholder="pageText.selectRolePlaceholder">
             <a-option value="member">{{ pageText.memberRole }}</a-option>
             <a-option value="admin">{{ pageText.adminRole }}</a-option>
-            <a-option value="owner">{{ pageText.ownerRole }}</a-option>
+            <a-option v-if="canTransferOwner" value="owner">{{ pageText.ownerRole }}</a-option>
           </a-select>
         </a-form-item>
       </a-form>
@@ -290,6 +290,7 @@ import {
   removeProjectMember,
   updateProjectMemberRole,
   type Project,
+  type ProjectCredential,
   type ProjectMember,
   type CreateProjectRequest,
   type UpdateProjectRequest
@@ -657,6 +658,10 @@ const handleRowClick = (record: Project) => {
 const membersModalVisible = ref(false);
 const membersLoading = ref(false);
 const selectedProject = ref<Project | null>(null);
+const canManageMembers = computed(() => authStore.user?.is_superuser ||
+  ['owner', 'admin'].includes(selectedProject.value?.current_user_role ?? ''));
+const canTransferOwner = computed(() => authStore.hasPermission('projects.change_projectmember') &&
+  (authStore.user?.is_superuser || selectedProject.value?.current_user_role === 'owner'));
 const projectMembers = ref<ProjectMember[]>([]);
 const membersModalTitle = computed(() => (
   `${pageText.value.projectMembersManagement}: ${selectedProject.value?.name || ''}`
@@ -825,7 +830,7 @@ const handleAddMember = async () => {
       Message.success(pageText.value.memberAddedSuccess);
       addMemberModalVisible.value = false;
       // 刷新成员列表
-      await fetchProjectMembers(selectedProject.value.id);
+      await refreshMemberManagement();
     } else {
       Message.error(response.error || pageText.value.addMemberFailed);
     }
@@ -875,6 +880,15 @@ const updateRoleForm = reactive({
   role: ''
 });
 
+const refreshMemberManagement = async () => {
+  const projectId = selectedProject.value?.id;
+  if (!projectId) return;
+  await Promise.all([fetchProjectMembers(projectId), fetchProjectList(), projectStore.fetchProjects()]);
+  if (selectedProject.value?.id === projectId) {
+    selectedProject.value = projectStore.projectList.find(project => project.id === projectId) ?? null;
+  }
+};
+
 // 显示更新角色模态框
 const showUpdateRoleModal = (member: ProjectMember) => {
   selectedMember.value = member;
@@ -900,7 +914,7 @@ const handleUpdateRole = async () => {
       Message.success(pageText.value.roleUpdatedSuccess);
       updateRoleModalVisible.value = false;
       // 刷新成员列表
-      await fetchProjectMembers(selectedProject.value.id);
+      await refreshMemberManagement();
     } else {
       Message.error(response.error || pageText.value.updateRoleFailed);
     }
@@ -1004,7 +1018,8 @@ const handleAddProject = async () => {
 // 编辑项目模态框相关
 const editProjectModalVisible = ref(false);
 const editProjectFormRef = ref();
-const editProjectForm = reactive<UpdateProjectRequest & { id: number }>({
+const originalCredentials = ref<ProjectCredential[]>([]);
+const editProjectForm = reactive<CreateProjectRequest & { id: number }>({
   id: 0,
   name: '',
   description: '',
@@ -1053,7 +1068,8 @@ const editProject = (project: Project, event?: Event) => {
   editProjectForm.description = project.description;
   
   // 复制凭据数据（密码不显示）
-  editProjectForm.credentials = (project.credentials || []).map(cred => ({
+  originalCredentials.value = project.credentials || [];
+  editProjectForm.credentials = originalCredentials.value.map(cred => ({
     id: cred.id,
     system_url: cred.system_url,
     username: cred.username,
@@ -1082,8 +1098,28 @@ const handleEditProject = async () => {
   const projectData: UpdateProjectRequest = {
     name: editProjectForm.name,
     description: editProjectForm.description,
-    credentials: editProjectForm.credentials || []
   };
+  const rows = editProjectForm.credentials || [];
+  const removedIds = originalCredentials.value
+    .flatMap(cred => cred.id && !rows.some(row => row.id === cred.id) ? [cred.id] : []);
+  const changedRows: Partial<ProjectCredential>[] = [];
+  for (const row of rows) {
+    const original = originalCredentials.value.find(cred => cred.id === row.id);
+    if (!original) {
+      changedRows.push(row);
+      continue;
+    }
+    const changes: Partial<ProjectCredential> = {};
+    for (const field of ['system_url', 'username', 'user_role'] as const) {
+      if (row[field] !== original[field]) changes[field] = row[field];
+    }
+    if (row.password) changes.password = row.password;
+    if (Object.keys(changes).length) changedRows.push({ id: row.id, ...changes });
+  }
+  if (changedRows.length || removedIds.length) {
+    projectData.credentials = changedRows;
+    projectData.removed_credential_ids = removedIds;
+  }
 
   try {
     const response = await updateProject(editProjectForm.id, projectData);

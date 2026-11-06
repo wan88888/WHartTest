@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed, nextTick, provide } from 'vue'
+import { onBeforeUnmount, ref, onMounted, watch, computed, nextTick, provide } from 'vue'
 import { Message, Modal } from '@arco-design/web-vue'
 import type { FormInstance } from '@arco-design/web-vue'
 import { useProjectStore } from '@/store/projectStore'
@@ -21,6 +21,8 @@ import { useAppI18n } from '@/composables/useAppI18n'
 
 const projectStore = useProjectStore()
 const tabsStore = useApiTabsStore()
+let disposed = false
+onBeforeUnmount(() => { disposed = true })
 const themeStore = useThemeStore()
 const { isEnglish, tl } = useAppI18n()
 const loading = ref(false)
@@ -863,7 +865,7 @@ const handleCopyInterface = async (api: ApiInterface) => {
 
     await fetchInterfaceListForDisplay()
 
-    if (copiedInterface) {
+    if (copiedInterface && !disposed) {
       selectedInterface.value = copiedInterface
       tabsStore.openOrActivateInterface(copiedInterface)
       viewMode.value = 'detail'
@@ -1095,6 +1097,7 @@ const handleSelectNoModuleInterface = async (api: ApiInterface) => {
   try {
     loading.value = true
     const response = await getInterfaceById(api.id!)
+    if (disposed) return
     selectedInterface.value = response.data
     // 创建或激活页签
     const tabId = tabsStore.openOrActivateInterface(response.data)
@@ -1112,6 +1115,7 @@ const handleSelectNoModuleInterface = async (api: ApiInterface) => {
     // 刷新无模块接口列表
     await fetchNoModuleInterfaces()
   } catch (error: any) {
+    if (disposed) return
     console.error('获取接口详情失败:', error)
     Message.error('获取接口详情失败')
     selectedInterface.value = api
@@ -1283,33 +1287,6 @@ const handleRunInterface = async (api: ApiInterface) => {
   }
   // 在详情页面中会自动触发调试
 }
-
-// 监听项目变化
-watch(
-  () => projectStore.currentProjectId,
-  (newProjectId, oldProjectId) => {
-    if (newProjectId !== oldProjectId) {
-      tabsStore.clearInterfaceTabs()
-      autoDebug.value = false
-      detailKey.value++
-    }
-
-    selectedApi.value = undefined
-    selectedInterface.value = undefined
-    interfaces.value = []
-    allInterfaces.value = []
-    noModuleInterfaces.value = []
-    hasNoModuleInterfaces.value = false
-    expandedIds.value = []
-    viewMode.value = 'detail'
-    pagination.value.page = 1
-    pagination.value.total = 0
-
-    fetchApiModules()
-    fetchInterfaceListForDisplay()
-  }
-)
-
 
 // 新建接口
 const handleCreateInterface = () => {
@@ -1486,8 +1463,7 @@ const handleTabChange = async (tabId: string) => {
 
 // 初始化时恢复页签
 onMounted(async () => {
-  // 恢复本地存储的页签
-  tabsStore.loadFromLocalStorage(projectStore.currentProjectId)
+  const mountedProjectId = projectStore.currentProjectId
 
   if (projectStore.currentProjectId) {
     await Promise.all([
@@ -1495,6 +1471,7 @@ onMounted(async () => {
       fetchInterfaceListForDisplay()
     ])
 
+    if (projectStore.currentProjectId !== mountedProjectId) return
     // 恢复当前激活页签对应的接口数据
     if (tabsStore.activeTabId) {
       const activeTab = tabsStore.tabs.find(t => t.id === tabsStore.activeTabId)
@@ -1536,10 +1513,6 @@ onMounted(async () => {
   }
 })
 
-// 保存页签到本地存储
-watch(() => tabsStore.tabs, () => {
-  tabsStore.saveToLocalStorage(projectStore.currentProjectId)
-}, { deep: true })
 </script>
 
 <template>

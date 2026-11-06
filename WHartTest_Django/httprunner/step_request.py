@@ -60,44 +60,21 @@ def call_hooks(
             if hook.isdigit():
                 # 尝试根据ID加载自定义函数
                 try:
-                    # 动态导入CustomFunction模型
-                    from api_functions.models import ApiCustomFunction as CustomFunction
-                    function_id = int(hook)
-                    custom_function = CustomFunction.objects.filter(id=function_id, is_active=True).first()
-                    if custom_function:
-                        logger.info(f"根据ID执行钩子函数: {function_id} -> {custom_function.name}")
-                        # 加载函数代码
-                        import types
-                        module = types.ModuleType(custom_function.name)
-                        code = compile(custom_function.code, custom_function.name, 'exec')
-                        exec(code, module.__dict__)
+                    from api_functions.models import ApiCustomFunction
+                    from api_functions.runtime import registered_functions
 
-                        # 获取模块中定义的所有函数
-                        module_functions = {
-                            name: obj for name, obj in module.__dict__.items()
-                            if isinstance(obj, types.FunctionType)
-                        }
-
-                        if module_functions:
-                            # 将函数添加到runner的functions_mapping中
-                            for func_name, func_obj in module_functions.items():
-                                runner.parser.functions_mapping[func_name] = func_obj
-                                logger.info(f"添加函数到运行时: {func_name}")
-
-                            # 执行函数（默认执行第一个函数）
-                            first_func_name = list(module_functions.keys())[0]
-                            first_func = module_functions[first_func_name]
-
-                            # 构造函数调用表达式
-                            func_call_expr = f"${{{first_func_name}()}}"  # 默认无参数调用
-                            logger.debug(f"call hook function by ID: {hook} -> {func_call_expr}")
-                            runner.parser.parse_data(func_call_expr, step_variables)
-                        else:
-                            logger.warning(f"函数ID {hook} 对应的代码中没有定义可调用的函数")
-                    else:
-                        logger.warning(f"找不到ID为{function_id}的钩子函数或函数未启用")
-                except Exception as e:
-                    logger.error(f"根据ID执行钩子函数失败: {hook}, 错误: {str(e)}")
+                    project_id = getattr(getattr(runner, 'testcase', None), 'project_id', None)
+                    if not project_id:
+                        project_id = getattr(runner, 'interface_data', {}).get('project_id')
+                    function = ApiCustomFunction.objects.get(pk=int(hook), project_id=project_id, is_active=True)
+                    functions = registered_functions(function.code)
+                    if not functions:
+                        raise ValueError('钩子缺少函数定义')
+                    runner.parser.functions_mapping.update(functions)
+                    name = next(iter(functions))
+                    runner.parser.parse_data(f"${{{name}()}}", step_variables)
+                except Exception as exc:
+                    raise ValueError(f"执行项目钩子函数 {hook} 失败: {exc}") from exc
             else:
                 # format 1: ["${func()}"]
                 logger.debug(f"call hook function: {hook}")

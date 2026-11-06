@@ -2,14 +2,13 @@ from typing import Dict, Optional
 import copy
 import logging
 import json
-import types
+from api_functions.runtime import load_custom_functions
 
 from httprunner import HttpRunner, Config, Step, RunRequest, RunSqlRequest
 from httprunner.client import sanitize_json_record
 from httprunner.models import TestCaseSummary
 from httprunner.parser import Parser
 
-from api_functions.models import ApiCustomFunction
 from .logging_utils import new_trace_id, summarize_for_log
 from file_management.services import validate_file_ids, serialize_file_for_runtime
 from .payloads import (
@@ -26,64 +25,6 @@ from .runner_uploads import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def load_custom_functions(project_id):
-    """Load custom functions for a project."""
-    functions = {}
-    loaded_count = 0
-    error_count = 0
-
-    try:
-        custom_functions = ApiCustomFunction.objects.filter(
-            project_id=project_id,
-            is_active=True,
-        ).select_related('project')
-
-        project_name = custom_functions[0].project.name if custom_functions else "Unknown"
-        logger.info(f"Loading custom functions for project [{project_name}]")
-
-        for func in custom_functions:
-            try:
-                module = types.ModuleType(func.name)
-                code = compile(func.code, func.name, 'exec')
-                exec(code, module.__dict__)
-
-                module_functions = {
-                    name: obj for name, obj in module.__dict__.items()
-                    if isinstance(obj, types.FunctionType)
-                }
-
-                if not module_functions:
-                    logger.warning(f"Function [{func.name}] did not define any callable functions")
-                    error_count += 1
-                    continue
-
-                for name in module_functions:
-                    if name in functions:
-                        logger.warning(f"Function name conflict: {name}, using latest definition")
-
-                functions.update(module_functions)
-                loaded_count += 1
-                logger.debug(f"Loaded function: {func.name}, methods: {list(module_functions.keys())}")
-
-            except SyntaxError as e:
-                logger.error(f"Function [{func.name}] syntax error: {str(e)}")
-                error_count += 1
-            except Exception as e:
-                logger.error(f"Failed to load function [{func.name}]: {str(e)}")
-                error_count += 1
-
-        logger.info(
-            f"Project [{project_name}] functions loaded: "
-            f"{loaded_count} succeeded, {error_count} failed"
-        )
-
-    except Exception as e:
-        logger.error(f"Error loading custom functions for project [{project_id}]: {str(e)}")
-
-    return functions
-
 
 
 def _resolve_runtime_files(project_id, file_ids):

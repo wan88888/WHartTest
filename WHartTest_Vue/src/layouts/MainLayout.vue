@@ -277,12 +277,13 @@
               <a-button @click="projectStore.fetchProjects">{{ locale === 'en-US' ? 'Retry' : '重试' }}</a-button>
             </div>
             <div v-else>
-              <a-empty :description="locale === 'en-US' ? 'No projects available' : '暂无可用项目'" />
+              <a-empty :description="noProjectDescription" />
               <router-link v-if="hasProjectsPermission" to="/projects">{{ projectsMenuLabel }}</router-link>
             </div>
           </div>
+          <a-empty v-else-if="$route.name === 'UiAutomation' && !hasUiAutomationPermission" :description="tl('您没有执行该操作的权限。')" />
           <keep-alive v-else include="LangGraphChat">
-            <component :is="Component" />
+            <component :is="Component" :key="['TestCaseManagement', 'TestSuiteManagement', 'TestExecutionHistory'].includes(String($route.name)) ? projectStore.currentProjectId ?? undefined : undefined" />
           </keep-alive>
         </router-view>
       </a-layout-content>
@@ -423,6 +424,14 @@ async function checkVersion() {
 
 // 用户信息
 const user = computed(() => authStore.currentUser);
+const noProjectDescription = computed(() => {
+  if (!user.value?.is_staff && user.value?.groups?.includes('普通测试成员')) {
+    return locale.value === 'en-US'
+      ? 'You have the tester role. Ask a project administrator to add you to a project.'
+      : '你已获得普通测试成员权限，请联系项目管理员将你加入项目。';
+  }
+  return locale.value === 'en-US' ? 'No projects available' : '暂无可用项目';
+});
 const username = computed(() => user.value?.display_name || user.value?.username || '');
 const userInitial = computed(() => {
   if (user.value?.first_name && user.value.first_name.length > 0) {
@@ -645,7 +654,7 @@ const checkProjectAndNavigate = (event: MouseEvent, path: string) => {
 
 const handleLogout = () => {
   authStore.logout();
-  router.push('/login');
+  window.location.replace(router.resolve('/login').href);
 };
 
 

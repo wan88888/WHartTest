@@ -1,4 +1,4 @@
-import httpService, { request } from '@/utils/request';
+import { request } from '@/utils/request';
 import type {
   ApiResponse,
   PaginatedResponse,
@@ -166,11 +166,12 @@ export class RequirementDocumentService {
    * 下载文档原始文件
    */
   static async downloadFile(id: string): Promise<ArrayBuffer> {
-    const response = await httpService.request<ArrayBuffer>({
+    const response = await request<ArrayBuffer>({
       url: `${BASE_URL}/documents/${id}/download-file/`,
       method: 'GET',
       responseType: 'arraybuffer'
     });
+    if (!response.success || !response.data) throw new Error(response.error || 'Download failed');
     return response.data;
   }
 

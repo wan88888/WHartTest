@@ -63,11 +63,13 @@ class RecorderSessionMeta:
         create_steps: bool,
         base_url: str,
         viewport: dict,
+        owner_id: Optional[int] = None,
         kind: str = 'record',          # record=步骤录制 / auth=登录态录制
         pre_page_step_id: Optional[int] = None,  # 前置页面步骤（录制启动前自动执行）
         env_config_id: Optional[int] = None,     # 所属环境配置（保存登录态时绑定到该环境）
         auth_state_id: Optional[int] = None,  # 录制表单选择的登录态（绑定录制步骤，启动时按此注入）
     ):
+        self.owner_id = owner_id
         self.user_id = user_id
         self.project_id = project_id
         self.page_id = page_id

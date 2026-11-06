@@ -190,9 +190,11 @@ const handleApplyHealing = async () => {
   if (!props.testCase || !props.diagnosis?.healing_suggestion) return;
   const suggestion = props.diagnosis.healing_suggestion;
 
+  if (!suggestion.token) return;
   applyingHealing.value = true;
   try {
     const res = await applyHealingSuggestion(props.testCase.project, props.testCase.id, {
+      token: suggestion.token,
       element_id: suggestion.element_id,
       element_name: suggestion.element_name,
       suggested_locator_type: suggestion.suggested_locator_type,

@@ -323,11 +323,12 @@ const startAutomationTask = (
   sendChatMessageStream(
     requestData,
     (sessionId) => {
-      localStorage.setItem('langgraph_session_id', sessionId);
-
       if (onStarted) {
         onStarted(sessionId);
       }
+
+      if (String(currentProjectId.value) !== requestData.project_id) return;
+      localStorage.setItem('langgraph_session_id', sessionId);
 
       // 保存提示词ID，使LangGraphChatView能恢复选中状态
       if (requestData.prompt_id) {
@@ -772,7 +773,7 @@ const executeUiTestCaseWithAutoHealing = async (
 
   try {
     const [envRes, actRes] = await Promise.all([
-      envConfigApi.list({ project: currentProjectId.value! }),
+      envConfigApi.list({ project: testCase.project }),
       actuatorApi.list(),
     ]);
     const envData = extractResponseData<any>(envRes);
@@ -908,6 +909,7 @@ const executeUiTestCaseWithAutoHealing = async (
 
       if (isSuccess) {
         finishTask(execTask.id, 'success');
+        if (currentProjectId.value !== testCase.project) return;
         updateTask(execTask.id, { currentStepDesc: isRetry ? '全部步骤执行通过（AI 自动自愈修复成功）' : '全部步骤执行通过' });
 
         if (isRetry) {
@@ -948,7 +950,7 @@ const executeUiTestCaseWithAutoHealing = async (
 你是一名资深 UI 自动化测试专家。当前功能测试用例【${testCase.name}】（ID: ${testCase.id}）在执行绑定的 UI 自动化用例（UI用例ID: ${targetUiTestCaseId}）时发生失败。
 
 【执行失败现场上下文】
-- 所属项目ID: ${currentProjectId.value}
+- 所属项目ID: ${testCase.project}
 - 所属模块: ${moduleInfo}
 - 失败步骤序号: 第 ${failedStepSort} 步
 - 步骤描述: ${failedStepDesc}
@@ -967,7 +969,7 @@ const executeUiTestCaseWithAutoHealing = async (
 
           const requestData: ChatRequest = {
             message,
-            project_id: String(currentProjectId.value),
+            project_id: String(testCase.project),
             module_key: 'testcase_execution',
             use_knowledge_base: false,
             test_case_id: testCase.id,
@@ -1032,7 +1034,7 @@ const executeUiTestCaseWithAutoHealing = async (
           );
 
           // 异步请求结构化诊断快照供本地报告抽屉展示
-          diagnoseTestCaseFailure(currentProjectId.value!, testCase.id)
+          diagnoseTestCaseFailure(testCase.project, testCase.id)
             .then((diagRes) => {
               if (diagRes.success && diagRes.data) {
                 aiDiagnosisResult.value = diagRes.data;
@@ -1043,6 +1045,7 @@ const executeUiTestCaseWithAutoHealing = async (
         } else {
           // 原生脚本模式 或 二次自愈重试仍失败
           finishTask(execTask.id, 'failed', errorMsg, aiDiagnosisResult.value);
+          if (currentProjectId.value !== testCase.project) return;
           if (isRetry) {
             addStepLog(execTask.id, '自愈重试后仍未通过，判定为深度业务缺陷或环境异常，需要人工介入', 'error');
             currentDiagnosingCase.value = testCase;
@@ -2001,7 +2004,8 @@ watch(
     if (view === 'mindmap' && projId) {
       fetchTestCasesForMindmap();
     }
-  }
+  },
+  { immediate: true }
 );
 
 watch(

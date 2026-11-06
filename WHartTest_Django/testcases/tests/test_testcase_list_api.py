@@ -1,8 +1,8 @@
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Permission, User
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
 
-from projects.models import Project
+from projects.models import Project, ProjectMember
 from testcases.models import TestCase as TestCaseModel, TestCaseModule, TestCaseStep
 
 
@@ -64,6 +64,23 @@ class TestCaseListApiTests(APITestCase):
         self.assertNotIn("steps", results[0])
         self.assertEqual(results[0]["id"], self.testcase.id)
         self.assertEqual(results[0]["name"], self.testcase.name)
+
+    def test_regular_project_member_needs_delete_permission_for_both_delete_routes(self):
+        member = User.objects.create_user(username="ordinary-tester")
+        ProjectMember.objects.create(project=self.project, user=member, role="member")
+        perms = Permission.objects.filter(content_type__app_label="testcases")
+        member.user_permissions.add(perms.get(codename="add_testcase"))
+        self.client.force_authenticate(member)
+        cases = f"/api/projects/{self.project.pk}/testcases/"
+        payload = {"ids": [self.testcase.pk]}
+        self.assertEqual(self.client.delete(f"{cases}{self.testcase.pk}/").status_code, 403)
+        self.assertEqual(self.client.post(cases + "batch-delete/", payload, format="json").status_code, 403)
+        self.assertTrue(TestCaseModel.objects.filter(pk=self.testcase.pk).exists())
+
+        member.user_permissions.add(perms.get(codename="delete_testcase"))
+        self.client.force_authenticate(User.objects.get(pk=member.pk))
+        self.assertEqual(self.client.post(cases + "batch-delete/", payload, format="json").status_code, 200)
+        self.assertFalse(TestCaseModel.objects.filter(pk=self.testcase.pk).exists())
 
     def test_list_api_uses_pagination(self):
         """列表接口应按 page/page_size 分页，返回 count/results 结构。"""

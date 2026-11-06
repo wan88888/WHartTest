@@ -14,8 +14,10 @@ def parse_link(value):
     try:
         uri = urlsplit(value.strip())
         host = uri.hostname or ''
-        valid_host = any(host == domain or host.endswith('.' + domain)
-                         for domain in ('feishu.cn', 'larkoffice.com', 'larksuite.com'))
+        valid_host = re.fullmatch(
+            r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*(?:feishu\.cn|larkoffice\.com|larksuite\.com)',
+            host,
+        )
         match = re.fullmatch(r'/(docx|wiki)/([A-Za-z0-9]{10,128})/?', uri.path)
         if (uri.scheme == 'https' and valid_host and uri.port in (None, 443)
                 and not uri.username and not uri.password and match):

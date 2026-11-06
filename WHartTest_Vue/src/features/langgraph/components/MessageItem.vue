@@ -86,7 +86,7 @@
             :class="['tool-content', 'message-render-skip', { 'collapsed': !message.isExpanded && shouldCollapse }]"
             :key="message.content"
             data-i18n-skip
-            v-html="formattedContent"
+            v-requirement-html="formattedContent"
           ></div>
           <div v-if="toolFileAttachments.length > 0" class="tool-file-list">
             <div v-for="file in toolFileAttachments" :key="`${file.url}-${file.name}`" class="tool-file-item">
@@ -138,7 +138,7 @@
             :key="message.content"
             class="thinking-body message-render-skip"
             data-i18n-skip
-            v-html="formattedContent"
+            v-requirement-html="formattedContent"
           ></div>
         </div>
 
@@ -149,7 +149,7 @@
           class="message-render-skip"
           :class="{ 'streaming-content': isStreamingMessage }"
           data-i18n-skip
-          v-html="formattedContent"
+          v-requirement-html="formattedContent"
         ></div>
         <div v-if="(canPreviewHtml || canPreviewDiagram) && message.messageType === 'ai'" class="diagram-preview-actions">
           <a-button v-if="canPreviewHtml" type="outline" size="mini" class="diagram-preview-btn" @click="handlePreviewHtml">
@@ -193,6 +193,7 @@
 </template>
 
 <script setup lang="ts">
+import { vRequirementHtml } from '@/features/requirements/services/requirementHtml';
 import { computed, nextTick, onMounted, onUnmounted, onUpdated, ref, watch } from 'vue';
 import { Button as AButton, Tooltip as ATooltip, Message } from '@arco-design/web-vue';
 import { IconCopy, IconReply, IconRefresh, IconDelete, IconEye, IconTool, IconFile } from '@arco-design/web-vue/es/icon';
@@ -746,7 +747,7 @@ const formattedContent = computed(() => {
     });
   } catch (error) {
     console.error('Error parsing markdown:', error);
-    return props.message.content;
+    return escapeHtml(props.message.content);
   }
 });
 

@@ -37,6 +37,7 @@ export interface RequirementDocument {
   title: string;
   description: string | null;
   document_type: DocumentType;
+  feishu_url?: string;
   file?: string; // 文件URL
   content?: string | null;
   status: DocumentStatus;

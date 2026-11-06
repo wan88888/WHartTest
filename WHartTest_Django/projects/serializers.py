@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 # 导入用户模型用于成员创建校验。
 from django.contrib.auth.models import User
+from django.db import transaction
 
 # 导入项目相关模型。
 from .models import Project, ProjectMember, ProjectCredential
@@ -13,7 +14,9 @@ from accounts.serializers import UserDetailSerializer
 
 class ProjectCredentialSerializer(serializers.ModelSerializer):
     """项目凭据序列化器"""
-    password = serializers.CharField(write_only=True, allow_blank=True, required=False, help_text='登录密码')
+    id = serializers.IntegerField(required=False, min_value=1)
+    password = serializers.CharField(write_only=True, allow_blank=True, required=False,
+                                     trim_whitespace=False, max_length=255, help_text='登录密码')
 
     class Meta:
         model = ProjectCredential
@@ -40,10 +43,15 @@ class ProjectSerializer(serializers.ModelSerializer):
     """项目基本信息序列化器"""
     creator_detail = UserDetailSerializer(source='creator', read_only=True)
     credentials = ProjectCredentialSerializer(many=True, required=False)
+    current_user_role = serializers.CharField(read_only=True, allow_null=True)
+    removed_credential_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), write_only=True, required=False,
+        help_text='显式指定删除的凭据。提供此字段时，credentials 只更新列出的条目。',
+    )
 
     class Meta:
         model = Project
-        fields = ['id', 'name', 'description', 'creator', 'creator_detail', 'created_at', 'updated_at', 'credentials']
+        fields = ['id', 'name', 'description', 'creator', 'creator_detail', 'created_at', 'updated_at', 'credentials', 'removed_credential_ids', 'current_user_role']
         read_only_fields = ['created_at', 'updated_at', 'creator']
 
     def validate_name(self, value):
@@ -55,6 +63,13 @@ class ProjectSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("项目名称已存在")
         return value
 
+    def validate(self, attrs):
+        if self.instance is None and ('removed_credential_ids' in attrs or
+                                      any('id' in row for row in attrs.get('credentials', []))):
+            raise serializers.ValidationError({'credentials': '新项目不能引用已有凭据。'})
+        return attrs
+
+    @transaction.atomic
     def create(self, validated_data):
         # 拆出嵌套凭据数据，先创建项目主记录，再逐条创建凭据。
         credentials_data = validated_data.pop('credentials', [])
@@ -63,19 +78,36 @@ class ProjectSerializer(serializers.ModelSerializer):
             ProjectCredential.objects.create(project=project, **credential_data)
         return project
 
+    @transaction.atomic
     def update(self, instance, validated_data):
-        # 允许局部更新；若传入 credentials，则按“全量替换”策略更新凭据。
+        instance = Project.objects.select_for_update().get(pk=instance.pk)
         credentials_data = validated_data.pop('credentials', None)
-        
-        instance.name = validated_data.get('name', instance.name)
-        instance.description = validated_data.get('description', instance.description)
-        instance.save()
+        removed_ids = validated_data.pop('removed_credential_ids', None)
+        instance = super().update(instance, validated_data)
+        if credentials_data is None and removed_ids is None:
+            return instance
 
-        if credentials_data is not None:
-            # 条件：前端显式提交凭据数组；动作：清空后重建；结果：数据库状态与提交内容完全一致。
-            instance.credentials.all().delete()
-            for credential_data in credentials_data:
-                ProjectCredential.objects.create(project=instance, **credential_data)
+        rows = credentials_data or []
+        existing_ids = set(instance.credentials.values_list('pk', flat=True))
+        submitted_ids = [row['id'] for row in rows if 'id' in row]
+        retained = set(submitted_ids)
+        # Older clients submit the complete list, while the editor sends only changed rows.
+        removed = set(removed_ids) if removed_ids is not None else existing_ids - retained
+        if len(submitted_ids) != len(retained) or retained & removed:
+            raise serializers.ValidationError({'credentials': '同一凭据不能重复提交或同时更新和删除。'})
+        if (retained | removed) - existing_ids:
+            raise serializers.ValidationError({'credentials': '凭据不存在或不属于此项目，请刷新后重试。'})
+
+        for row in rows:
+            credential_id = row.pop('id', None)
+            if credential_id is None:
+                instance.credentials.create(**row)
+                continue
+            if row.get('password') == '':
+                del row['password']
+            if row:
+                instance.credentials.filter(pk=credential_id).update(**row)
+        instance.credentials.filter(pk__in=removed).delete()
 
         return instance
 

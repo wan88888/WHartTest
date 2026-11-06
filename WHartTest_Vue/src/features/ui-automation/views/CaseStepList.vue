@@ -172,7 +172,7 @@ import { IconPlus, IconEdit, IconDelete, IconDragDotVertical } from '@arco-desig
 import draggable from 'vuedraggable'
 import { caseStepsApi, pageStepsApi, moduleApi, envConfigApi, authStateApi } from '../api'
 import type { UiCaseStepsDetailed, UiPageSteps, UiTestCase, ExecutionStatus, UiModule, UiEnvironmentConfig, UiAuthState } from '../types'
-import { STATUS_LABELS, extractListData, extractResponseData } from '../types'
+import { extractPaginationData, STATUS_LABELS, extractListData, extractResponseData } from '../types'
 import { useProjectStore } from '@/store/projectStore'
 import { useAppI18n } from '@/composables/useAppI18n'
 
@@ -474,15 +474,27 @@ const statusColors: Record<ExecutionStatus, string> = { 0: 'gray', 1: 'blue', 2:
 const caseStepModalTitle = computed(() => (isEdit.value ? pageText.value.editStep : pageText.value.addStep))
 const formatStatusLabel = (status: ExecutionStatus) => tl(STATUS_LABELS[status])
 
+let stepRequest = 0
 const fetchSteps = async () => {
+  const requestId = ++stepRequest
+  const caseId = props.testCase.id
   loading.value = true
   try {
-    const res = await caseStepsApi.list({ test_case: props.testCase.id })
-    stepData.value = extractListData<UiCaseStepsDetailed>(res)
+    const steps: UiCaseStepsDetailed[] = []
+    let page = 1
+    while (true) {
+      const res = await caseStepsApi.list({ test_case: caseId, page, page_size: 500 })
+      if (requestId !== stepRequest) return
+      const { items, count } = extractPaginationData(res)
+      steps.push(...items)
+      if (!items.length || steps.length >= count) break
+      page++
+    }
+    stepData.value = steps
   } catch {
-    Message.error(pageText.value.fetchStepListFailed)
+    if (requestId === stepRequest) Message.error(pageText.value.fetchStepListFailed)
   } finally {
-    loading.value = false
+    if (requestId === stepRequest) loading.value = false
   }
 }
 
@@ -634,13 +646,7 @@ const deleteStep = async (step: UiCaseStepsDetailed) => {
 
 const onDragEnd = async () => {
   try {
-    const steps = stepData.value.map((s, idx) => ({
-      page_step: s.page_step,
-      case_sort: idx,
-      switch_step_open_url: s.switch_step_open_url,
-      error_retry: s.error_retry,
-    }))
-    await caseStepsApi.batchUpdate(props.testCase.id, steps)
+    await caseStepsApi.reorder(props.testCase.id, stepData.value.map(step => step.id!))
     Message.success(pageText.value.sortSaved)
   } catch {
     Message.error(pageText.value.sortSaveFailed)

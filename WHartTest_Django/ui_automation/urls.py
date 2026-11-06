@@ -9,7 +9,7 @@ from .views import (
     UiTestCaseViewSet, UiCaseStepsDetailedViewSet,
     UiExecutionRecordViewSet, UiPublicDataViewSet, UiEnvironmentConfigViewSet,
     UiAuthStateViewSet, ActuatorViewSet, UiBatchExecutionRecordViewSet,
-    upload_screenshot, upload_trace,
+    upload_screenshot, upload_trace, download_artifact,
     trigger_batch_execution, UiRecorderSessionViewSet
 )
 
@@ -31,6 +31,7 @@ router.register('recorder-sessions', UiRecorderSessionViewSet, basename='ui-reco
 
 urlpatterns = router.urls + [
     path('screenshots/upload/', upload_screenshot, name='ui-screenshot-upload'),
+    path('artifacts/<int:pk>/', download_artifact, name='ui-artifact'),
     path('traces/upload/', upload_trace, name='ui-trace-upload'),
     path('trigger-batch/', trigger_batch_execution, name='ui-trigger-batch'),
 ]

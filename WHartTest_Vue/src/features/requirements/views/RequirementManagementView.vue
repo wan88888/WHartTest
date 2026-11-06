@@ -42,7 +42,7 @@
       <a-table
         :columns="columns"
         :data="documentList"
-        :loading="loading"
+        :loading="loading || listLoading"
         :pagination="pagination"
         :scroll="{ x: 1000 }"
         @page-change="handlePageChange"
@@ -494,6 +494,8 @@ const reviewWorkerOptions = computed(() => (
 
 // 响应式数据
 const loading = ref(false);
+const listLoading = ref(false);
+let documentRequestVersion = 0;
 const documentList = ref<RequirementDocument[]>([]);
 const searchKeyword = ref('');
 const statusFilter = ref<DocumentStatus | ''>('');
@@ -660,15 +662,17 @@ const formatModuleCount = (count: number) => (
 
 // 加载文档列表
 const loadDocuments = async () => {
-  if (!currentProjectId.value) {
-    Message.warning(pageText.value.selectProjectFirst);
+  const version = ++documentRequestVersion;
+  const projectId = currentProjectId.value;
+  if (!projectId) {
+    listLoading.value = false;
     return;
   }
 
-  loading.value = true;
+  listLoading.value = true;
   try {
     const params: DocumentListParams = {
-      project: String(currentProjectId.value),
+      project: String(projectId),
       page: pagination.current,
       page_size: pagination.pageSize
     };
@@ -685,7 +689,7 @@ const loadDocuments = async () => {
 
     const response = await RequirementDocumentService.getDocumentList(params);
 
-    console.log('API响应:', response); // 调试日志
+    if (version !== documentRequestVersion) return;
 
     if (response.status === 'success') {
       const { results, count } = normalizeListPayload<RequirementDocument>(response.data);
@@ -695,10 +699,11 @@ const loadDocuments = async () => {
       Message.error(response.message || pageText.value.loadDocumentsFailed);
     }
   } catch (error) {
+    if (version !== documentRequestVersion) return;
     console.error('加载文档列表失败:', error);
     Message.error(pageText.value.loadDocumentsFailed);
   } finally {
-    loading.value = false;
+    if (version === documentRequestVersion) listLoading.value = false;
   }
 };
 
@@ -959,7 +964,14 @@ const deleteDocument = async (document: RequirementDocument) => {
 
 // 项目列表可能在授权回跳后才载入。
 watch(currentProjectId, (projectId) => {
-  if (!projectId) return;
+  pagination.current = 1;
+  pagination.total = 0;
+  documentList.value = [];
+  if (!projectId) {
+    ++documentRequestVersion;
+    listLoading.value = false;
+    return;
+  }
   uploadForm.project = String(projectId);
   if (router.currentRoute.value.query.retryFeishu === '1') {
     const draft = getImportDraft();

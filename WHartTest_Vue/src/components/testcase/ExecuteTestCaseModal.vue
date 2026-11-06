@@ -31,7 +31,7 @@
           </div>
           <div v-else class="unbound-ui-info">
             <a-tag color="gray" size="small">{{ tl('未绑定 UI 脚本') }}</a-tag>
-            <a-button type="text" size="mini" @click="showBindSelect = !showBindSelect">
+            <a-button type="text" size="mini" v-if="canBind" @click="showBindSelect = !showBindSelect">
               {{ showBindSelect ? tl('取消选择') : tl('关联已有 UI 用例') }}
             </a-button>
           </div>
@@ -62,13 +62,13 @@
       <a-form :model="formData" layout="vertical">
         <a-form-item :label="tl('执行模式')">
           <a-radio-group v-model="formData.executionMode" direction="vertical" class="mode-radio-group">
-            <a-radio value="hybrid" :disabled="!hasAvailableUiCase">
+            <a-radio value="hybrid" :disabled="!hasAvailableUiCase || !canExecuteScript">
               <div class="radio-label">
                 <span class="radio-title">{{ tl('智能双模执行（推荐）') }}</span>
                 <span class="radio-desc">{{ tl('先高速运行 UI 自动化脚本（零 Token、秒级执行）；若执行失败，AI 测试工程师自动介入诊断并自愈！') }}</span>
               </div>
             </a-radio>
-            <a-radio value="script_only" :disabled="!hasAvailableUiCase">
+            <a-radio value="script_only" :disabled="!hasAvailableUiCase || !canExecuteScript">
               <div class="radio-label">
                 <span class="radio-title">{{ tl('仅执行 UI 自动化脚本') }}</span>
                 <span class="radio-desc">{{ tl('仅运行绑定的 Playwright/Actuator UI 脚本，失败不调用 AI 介入。') }}</span>
@@ -103,6 +103,7 @@
 import { ref, watch, computed } from 'vue';
 import { IconCheckCircle } from '@arco-design/web-vue/es/icon';
 import type { TestCase } from '@/services/testcaseService';
+import { useAuthStore } from '@/store/authStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import { testCaseApi } from '@/features/ui-automation/api';
 import type { UiTestCase } from '@/features/ui-automation/types';
@@ -128,6 +129,9 @@ const props = defineProps<Props>();
 const emit = defineEmits<Emits>();
 const { tl } = useAppI18n();
 
+const authStore = useAuthStore();
+const canExecuteScript = computed(() => authStore.hasPermission('ui_automation.add_uiexecutionrecord'));
+const canBind = computed(() => authStore.hasPermission('ui_automation.view_uitestcase') && authStore.hasPermission('testcases.change_testcase'));
 const internalVisible = computed({
   get: () => props.visible,
   set: (val) => emit('update:visible', val),
@@ -171,7 +175,7 @@ const hasAvailableUiCase = computed(() => {
 
 // 加载当前项目下的 UI 测试用例
 const loadProjectUiCases = async () => {
-  if (!props.testCase?.project) return;
+  if (!canBind.value || !props.testCase?.project) return;
   loadingUiCases.value = true;
   try {
     const res = await testCaseApi.list({ project: props.testCase.project });
@@ -191,7 +195,7 @@ watch(
     if (val) {
       const hasBound = Boolean(props.testCase?.ui_test_case);
       formData.value = {
-        executionMode: hasBound ? (props.testCase?.execution_mode || 'hybrid') : 'ai_only',
+        executionMode: hasBound && canExecuteScript.value ? (props.testCase?.execution_mode || 'hybrid') : 'ai_only',
         generatePlaywrightScript: !hasBound,
       };
       selectedUiTestCaseId.value = props.testCase?.ui_test_case || undefined;
@@ -204,7 +208,7 @@ watch(
 watch(
   () => selectedUiTestCaseId.value,
   (val) => {
-    if (val && formData.value.executionMode === 'ai_only') {
+    if (val && canExecuteScript.value && formData.value.executionMode === 'ai_only') {
       formData.value.executionMode = 'hybrid';
     } else if (!val && !props.testCase?.ui_test_case && formData.value.executionMode !== 'ai_only') {
       formData.value.executionMode = 'ai_only';
@@ -223,6 +227,7 @@ const getLevelColor = (level?: string) => {
 };
 
 const handleConfirm = () => {
+  if (formData.value.executionMode !== 'ai_only' && !canExecuteScript.value) return;
   emit('confirm', {
     executionMode: formData.value.executionMode,
     generatePlaywrightScript: formData.value.generatePlaywrightScript,

@@ -2088,11 +2088,16 @@ class PlaywrightExecutor:
                 trace_path=trace_path
             )
 
+    def stop_batch_case(self, case_id):
+        child = getattr(self, '_batch_children', {}).get(case_id)
+        if child:
+            child.cancel()
+
     async def execute_batch_concurrent(
         self,
         configs: list[TestCaseConfig],
         max_concurrent: int = 3,
-        on_result = None
+        on_result = None, cancelled = None
     ) -> list[CaseResultModel]:
         """并发执行多个用例
 
@@ -2124,6 +2129,29 @@ class PlaywrightExecutor:
 
         async def run_with_limit(config: TestCaseConfig):
             async with semaphore:
+                if any(step.auth_state_id for step in config.page_steps):
+                    # Account switching rebuilds a browser context. Keep the single-run
+                    # executor state private to this case while its peers keep running.
+                    worker = PlaywrightExecutor(
+                        browser_type=self.browser_type, headless=self.headless, persistent=False,
+                        launch_timeout=self.launch_timeout, action_timeout=self.action_timeout,
+                        screenshot_dir=self.screenshot_dir, retry_count=self.retry_count,
+                        step_interval=self.step_interval, fail_fast=self.fail_fast,
+                        viewport_width=self.default_viewport['width'], viewport_height=self.default_viewport['height'],
+                        trace_enabled=self.trace_enabled, trace_dir=self.trace_dir,
+                        trace_screenshots=self.trace_screenshots, trace_snapshots=self.trace_snapshots,
+                        trace_sources=self.trace_sources, stealth_enabled=self.stealth_enabled,
+                        stealth_user_agent=self.stealth_user_agent,
+                    )
+                    worker._runtime_viewport = getattr(self, '_runtime_viewport', None)
+                    worker._viewport_explicit = getattr(self, '_viewport_explicit', False)
+                    try:
+                        result = await worker.execute_test_case(config)
+                        if on_result:
+                            await on_result(result)
+                        return result
+                    finally:
+                        await worker.close()
                 # 每个用例独立的浏览器上下文
                 context = await browser.new_context(**context_options)
                 await self._apply_context_init_scripts(context)
@@ -2141,14 +2169,18 @@ class PlaywrightExecutor:
 
         try:
             # 并发执行所有用例
-            results = await asyncio.gather(
-                *[run_with_limit(c) for c in configs],
-                return_exceptions=True
-            )
+            self._batch_children = {
+                config.case_id: asyncio.create_task(run_with_limit(config)) for config in configs
+            }
+            for case_id in cancelled or ():
+                self.stop_batch_case(case_id)
+            results = await asyncio.gather(*self._batch_children.values(), return_exceptions=True)
 
             # 处理异常结果
             final_results = []
             for i, result in enumerate(results):
+                if isinstance(result, asyncio.CancelledError):
+                    continue  # The consumer reports this target as stopped.
                 if isinstance(result, Exception):
                     final_results.append(CaseResultModel(
                         case_id=configs[i].case_id,
@@ -2167,6 +2199,7 @@ class PlaywrightExecutor:
             return final_results
 
         finally:
+            self._batch_children = {}
             try:
                 await asyncio.wait_for(browser.close(), timeout=10.0)
             except Exception as e:

@@ -174,7 +174,9 @@ onMounted(() => {
 })
 
 // 组件卸载时清理
+let disposed = false
 onBeforeUnmount(() => {
+  disposed = true
   if (resizeDragHandle.value) {
     resizeDragHandle.value.removeEventListener('mousedown', handleMouseDown)
   }
@@ -184,6 +186,7 @@ onBeforeUnmount(() => {
 
 // 处理发送请求
 const handleSend = async (requestData: { method: string, url: string, id?: number, quickDebug?: boolean, quickDebugRequest?: QuickDebugInterfaceRequest }) => {
+  const tabId = tabsStore.activeTabId
   console.log('接收到的请求数据:', requestData)
   console.log('当前接口:', props.interface)
 
@@ -276,6 +279,7 @@ const handleSend = async (requestData: { method: string, url: string, id?: numbe
       console.log('发送快速调试请求:', quickDebugData);
 
       const { data } = await quickDebugInterface(quickDebugData);
+      if (disposed || tabId !== tabsStore.activeTabId) return
       showExtractPersistenceNotice(data.extract_persistence)
       response.value = {
         status: data.status_code || null,
@@ -308,6 +312,7 @@ const handleSend = async (requestData: { method: string, url: string, id?: numbe
       console.log('发送调试请求:', debugData);
 
       const { data } = await debugInterface(requestData.id!, debugData)
+      if (disposed || tabId !== tabsStore.activeTabId) return
       showExtractPersistenceNotice(data.extract_persistence)
       response.value = {
         status: data.status_code || null,
@@ -385,6 +390,7 @@ const collectFileIdsFromBody = (body: any): number[] => {
 
 // 处理保存用例
 const handleSave = async (requestData: { method: string, url: string, name: string, module?: number | string | null, status?: string }) => {
+  const tabId = tabsStore.activeTabId
   if (!projectStore.currentProjectId) {
     Message.warning('请先选择项目')
     return
@@ -462,6 +468,7 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
     let savedInterface: ApiInterface | undefined
     if (props.interface?.id) {
       const response = await updateInterface(props.interface.id, data)
+      if (disposed || tabId !== tabsStore.activeTabId) return
       console.log('更新接口响应:', response)
       Message.success('更新接口成功')
       savedInterface = response.data
@@ -469,6 +476,7 @@ const handleSave = async (requestData: { method: string, url: string, name: stri
       emit('refresh', savedInterface?.module || normalizedModuleId)
     } else {
       const response = await createInterface(data)
+      if (disposed || tabId !== tabsStore.activeTabId) return
       console.log('创建接口响应:', response)
       Message.success('创建接口成功')
       savedInterface = response.data

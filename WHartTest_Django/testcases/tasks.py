@@ -7,6 +7,7 @@ import re
 from celery import shared_task
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Count
 from datetime import datetime
 from typing import Dict, Any
 from django.conf import settings
@@ -83,37 +84,19 @@ def execute_test_suite(self, execution_id):
         dict: 执行结果摘要
     """
     try:
-        # 获取执行记录
-        execution = TestExecution.objects.select_related('suite').get(id=execution_id)
-        suite = execution.suite
-        
-        logger.info(f"开始执行测试套件: {suite.name} (ID: {suite.id})")
-        
-        # 更新执行状态为运行中
-        execution.status = 'running'
-        execution.started_at = timezone.now()
-        execution.celery_task_id = self.request.id
-        execution.save(update_fields=['status', 'started_at', 'celery_task_id', 'updated_at'])
-        
-        # 1. 获取套件中的所有测试用例
-        testcases = suite.testcases.all().order_by('level', 'id')  # 按优先级排序
-        
-        # 更新总数
-        execution.total_count = testcases.count()
-        execution.save(update_fields=['total_count', 'updated_at'])
-        
-        # 收集所有待执行的任务
-        all_tasks = []
-        
-        # 为每个测试用例创建结果记录
-        for testcase in testcases:
-            result = TestCaseResult.objects.create(
-                execution=execution,
-                testcase=testcase,
-                status='pending'
-            )
-            all_tasks.append(result)
-        
+        with transaction.atomic():
+            execution = TestExecution.objects.select_for_update().get(pk=execution_id)
+            if execution.status != 'pending':
+                return {'execution_id': execution.pk, 'status': execution.status}
+            suite = execution.suite
+            _prepare_suite_results(execution)
+            all_tasks = list(execution.results.select_related('testcase').order_by('testcase__level', 'testcase_id'))
+            execution.status = 'running'
+            execution.started_at = timezone.now()
+            execution.celery_task_id = self.request.id
+            execution.total_count = len(all_tasks)
+            execution.save(update_fields=['status', 'started_at', 'celery_task_id', 'total_count', 'updated_at'])
+
         # 获取并发配置
         max_concurrent = suite.max_concurrent_tasks
         logger.info(f"并发配置: {max_concurrent} 个任务同时执行")
@@ -129,10 +112,10 @@ def execute_test_suite(self, execution_id):
             loop.close()
         
         # 更新执行记录为已完成
+        now = timezone.now()
+        TestExecution.objects.filter(pk=execution_id, status='running').update(
+            status='completed', completed_at=now, updated_at=now)
         execution.refresh_from_db()
-        execution.status = 'completed' if execution.status != 'cancelled' else 'cancelled'
-        execution.completed_at = timezone.now()
-        execution.save(update_fields=['status', 'completed_at', 'updated_at'])
         sync_scheduled_task_result(execution)
         
         logger.info(f"测试套件执行完成: {suite.name}, "
@@ -165,156 +148,74 @@ def execute_test_suite(self, execution_id):
         
         # 尝试更新执行状态为失败
         try:
-            execution = TestExecution.objects.get(id=execution_id)
-            execution.status = 'failed'
-            execution.completed_at = timezone.now()
-            execution.save(update_fields=['status', 'completed_at', 'updated_at'])
-            sync_scheduled_task_result(execution)
+            now = timezone.now()
+            if TestExecution.objects.filter(pk=execution_id, status__in=['pending', 'running']).update(
+                    status='failed', completed_at=now, updated_at=now):
+                sync_scheduled_task_result(TestExecution.objects.get(pk=execution_id))
         except:
             pass
             
         return {'error': error_msg}
 
 
-def execute_single_testcase(result: TestCaseResult):
-    """
-    执行单个测试用例 - 通过对话API驱动测试执行
-    
-    Args:
-        result: TestCaseResult实例
-    """
-    logger.info(f"开始执行测试用例: {result.testcase.name} (ID: {result.testcase.id})")
-    
-    # 更新状态为执行中
-    result.status = 'running'
+def _prepare_suite_results(execution):
+    # The parent row is locked by the caller. A pending execution can be cancelled before pickup.
+    if not execution.results.exists():
+        case_ids = execution.suite.testcases.values_list('id', flat=True)
+        TestCaseResult.objects.bulk_create([
+            TestCaseResult(execution=execution, testcase_id=case_id) for case_id in case_ids
+        ])
+
+
+_RESULT_COUNTS = {'pass': 'passed_count', 'fail': 'failed_count', 'skip': 'skipped_count', 'error': 'error_count'}
+
+
+@transaction.atomic
+def _finish_result(result):
+    execution = TestExecution.objects.select_for_update().get(pk=result.execution_id)
+    if execution.status != 'running':
+        return
+    now = timezone.now()
+    saved = execution.results.filter(pk=result.pk, status='running').update(
+        status=result.status, error_message=result.error_message, execution_log=result.execution_log,
+        screenshots=result.screenshots, completed_at=now, updated_at=now,
+        execution_time=(now - result.started_at).total_seconds(),
+    )
+    if saved:
+        counter = _RESULT_COUNTS[result.status]
+        setattr(execution, counter, getattr(execution, counter) + 1)
+        execution.save(update_fields=[counter, 'updated_at'])
+
+
+async def _run_result(result):
     result.started_at = timezone.now()
-    result.save(update_fields=['status', 'started_at', 'updated_at'])
-    
+    pending = TestCaseResult.objects.filter(pk=result.pk, status='pending', execution__status='running')
+    if not await pending.aupdate(status='running', started_at=result.started_at, updated_at=result.started_at):
+        return
+    result.status = 'running'
     try:
-        # 在新的事件循环中运行异步执行
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(_execute_testcase_via_chat_api(result))
-        finally:
-            loop.close()
-        
-        logger.info(f"测试用例执行成功: {result.testcase.name}")
-        
-    except Exception as e:
-        error_msg = f"执行测试用例失败: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        
+        await _execute_testcase_via_chat_api(result)
+    except Exception as exc:
         result.status = 'error'
-        result.error_message = error_msg
-        result.completed_at = timezone.now()
-        
-        if result.started_at and result.completed_at:
-            result.execution_time = (result.completed_at - result.started_at).total_seconds()
-            
-        result.save()
+        result.error_message = str(exc)
+        logger.exception('测试用例执行失败 result=%s', result.pk)
+        await sync_to_async(_finish_result)(result)
         raise
+    await sync_to_async(_finish_result)(result)
+
+
+def execute_single_testcase(result: TestCaseResult):
+    asyncio.run(_run_result(result))
 
 
 async def _execute_tasks_concurrently(execution, tasks_list, max_concurrent):
-    """
-    并发执行测试任务
-    
-    Args:
-        execution: TestExecution实例
-        tasks_list: TestCaseResult 列表
-        max_concurrent: 最大并发数
-    """
-    import asyncio
-    
-    # 使用信号量控制并发数
     semaphore = asyncio.Semaphore(max_concurrent)
-    
-    async def execute_with_semaphore(task_obj):
-        """带信号量控制的执行函数"""
+
+    async def run(result):
         async with semaphore:
-            # 检查是否已取消
-            current_execution = await sync_to_async(TestExecution.objects.get)(id=execution.id)
-            if current_execution.status == 'cancelled':
-                task_name = task_obj.testcase.name
-                logger.info(f"测试执行已取消，跳过任务: {task_name}")
-                return
-            
-            try:
-                # 更新状态为执行中
-                task_obj.status = 'running'
-                task_obj.started_at = timezone.now()
-                await sync_to_async(task_obj.save)()
-                
-                # 执行测试用例
-                await _execute_testcase_via_chat_api(task_obj)
-                task_name = task_obj.testcase.name
-                
-                logger.info(f"任务执行成功: {task_name}")
-                
-                # 刷新状态
-                await sync_to_async(task_obj.refresh_from_db)()
-                
-                # 统一状态映射
-                status_map = {
-                    'pass': 'pass', 'passed': 'pass',
-                    'fail': 'fail', 'failed': 'fail',
-                    'skip': 'skip', 'skipped': 'skip',
-                    'error': 'error'
-                }
-                normalized_status = status_map.get(task_obj.status, 'error')
-                
-                # 更新统计（使用原子操作避免竞态）
-                await sync_to_async(_update_execution_counts)(execution, normalized_status)
-                
-            except Exception as e:
-                task_name = task_obj.testcase.name
-                    
-                error_msg = f"并发执行任务失败: {str(e)}"
-                logger.error(f"{error_msg} - {task_name}", exc_info=True)
-                
-                # 更新状态为错误
-                task_obj.status = 'error'
-                task_obj.error_message = error_msg
-                task_obj.completed_at = timezone.now()
-                
-                if task_obj.started_at and task_obj.completed_at:
-                    task_obj.execution_time = (task_obj.completed_at - task_obj.started_at).total_seconds()
-                
-                await sync_to_async(task_obj.save)()
-                
-                # 更新错误计数
-                await sync_to_async(_update_execution_counts)(execution, 'error')
-    
-    # 创建所有任务
-    async_tasks = [execute_with_semaphore(task) for task in tasks_list]
-    
-    # 并发执行所有任务
-    await asyncio.gather(*async_tasks, return_exceptions=True)
+            await _run_result(result)
 
-
-def _update_execution_counts(execution, status):
-    """
-    原子更新执行统计
-    使用select_for_update避免并发写入冲突
-    """
-    with transaction.atomic():
-        # 锁定当前执行记录
-        exec_obj = TestExecution.objects.select_for_update().get(id=execution.id)
-        
-        if status == 'pass':
-            exec_obj.passed_count += 1
-        elif status == 'fail':
-            exec_obj.failed_count += 1
-        elif status == 'skip':
-            exec_obj.skipped_count += 1
-        elif status == 'error':
-            exec_obj.error_count += 1
-        
-        exec_obj.save(update_fields=[
-            'passed_count', 'failed_count', 'skipped_count',
-            'error_count', 'updated_at'
-        ])
+    await asyncio.gather(*(run(result) for result in tasks_list), return_exceptions=True)
 
 
 @sync_to_async
@@ -326,12 +227,6 @@ def _get_testcase_steps(testcase):
 def _get_test_execution_prompt(executor):
     """获取测试用例执行提示词"""
     return UserPrompt.get_user_prompt_by_type(executor, PromptType.TEST_CASE_EXECUTION)
-
-@sync_to_async
-def _save_result(result: TestCaseResult):
-    """异步安全地保存测试结果"""
-    result.save()
-
 
 def _normalize_media_url(url: str) -> str:
     """
@@ -365,6 +260,23 @@ def _normalize_media_url(url: str) -> str:
         url = url[1:]
     
     return f"{media_url}/{url}"
+
+
+def _reported_outcome(report, expected_steps):
+    if not isinstance(report, dict) or report.get("status") not in ("pass", "fail"):
+        return "error", "AI 未返回有效的结构化执行结果"
+    if report["status"] == "fail":
+        return "fail", str(report.get("summary") or "AI 报告执行失败")
+    steps = report.get("steps")
+    if not isinstance(steps, list) or not steps or not all(isinstance(step, dict) for step in steps):
+        return "error", "AI 通过报告缺少步骤结果"
+    if any(step.get("status") == "fail" for step in steps):
+        return "fail", "报告中包含失败步骤"
+    numbers = [step.get("step_number") for step in steps]
+    if (not all(type(n) is int for n in numbers) or sorted(numbers) != sorted(expected_steps)
+            or any(step.get("status") != "pass" or step.get("error") for step in steps)):
+        return "error", "AI 通过报告未确认所有用例步骤执行成功"
+    return "pass", ""
 
 
 def _extract_test_result_json(response_text: str) -> dict | None:
@@ -708,48 +620,20 @@ async def _execute_testcase_via_chat_api(result: TestCaseResult):
             logger.debug(f"最终响应前100字符: {final_response[:100] if len(final_response) > 100 else final_response}")
             logger.debug(f"最终响应是否包含```json: {'```json' in final_response}")
         test_result_json = _extract_test_result_json(final_response)
-        if not test_result_json:
-            logger.warning(f"无法从AI响应中提取JSON, 响应长度: {len(final_response) if final_response else 0}")
-            if final_response:
-                logger.warning(f"响应内容(截断): {final_response[:500] if len(final_response) > 500 else final_response}")
-            execution_log.append(f"⚠ AI响应格式不符合预期，分析响应内容")
-            # 将实际响应内容记录到执行日志中，方便排查
-            truncated = final_response[:1000] if final_response and len(final_response) > 1000 else final_response
-            execution_log.append(f"实际响应: {truncated or '(无响应)'}")
-        
-        # 8. 根据解析结果更新TestCaseResult
+        result.status, result.error_message = _reported_outcome(test_result_json, [step.step_number for step in steps])
+        execution_log.append(f"测试结果: {result.status}")
+        if result.error_message:
+            execution_log.append(result.error_message)
         if test_result_json:
-            final_status = test_result_json.get('status', 'fail')
-            summary = test_result_json.get('summary', '')
-            step_results = test_result_json.get('steps', [])
-            
-            result.status = 'pass' if final_status == 'pass' else 'fail'
-            
-            execution_log.append(f"\n{'='*50}")
-            execution_log.append(f"测试结果: {final_status.upper()}")
-            execution_log.append(f"总结: {summary}")
-            execution_log.append(f"{'='*50}\n")
-            
-            for step_result in step_results:
-                step_num = step_result.get('step_number', 0)
-                step_desc = step_result.get('description', '')
-                step_status = step_result.get('status', 'unknown')
-                step_error = step_result.get('error')
-                
-                status_icon = "✓" if step_status == 'pass' else "✗"
-                execution_log.append(f"[步骤 {step_num}] {status_icon} {step_desc}")
-                
-                if step_error:
-                    execution_log.append(f"  错误: {step_error}")
-        else:
-            # 没有结构化JSON，分析响应内容判断结果
-            has_error = 'error' in final_response.lower() or 'fail' in final_response.lower() or '失败' in final_response
-            result.status = 'fail' if has_error else 'pass'
-            
-            execution_log.append(f"\n{'='*50}")
-            execution_log.append(f"测试完成 - 状态: {'失败' if has_error else '通过'}")
-            execution_log.append(f"{'='*50}\n")
-        
+            execution_log.append(str(test_result_json.get("summary") or ""))
+            step_reports = test_result_json.get("steps")
+            for step_report in step_reports if isinstance(step_reports, list) else []:
+                if isinstance(step_report, dict):
+                    execution_log.append(f"[步骤 {step_report.get('step_number')}] {step_report.get('status')} "
+                                         f"{step_report.get('description', '')} {step_report.get('error') or ''}")
+        elif final_response:
+            execution_log.append(f"实际响应: {final_response[:1000]}")
+
         # 获取测试用例的截图
         try:
             testcase_screenshots = await sync_to_async(
@@ -764,10 +648,6 @@ async def _execute_testcase_via_chat_api(result: TestCaseResult):
         except Exception as e:
             logger.warning(f"获取测试用例截图失败: {e}")
         
-        if result.status == 'running':
-            result.status = 'pass'
-            execution_log.append("\n✓ 所有步骤执行完成")
-                
     except httpx.HTTPError as e:
         error_msg = f"调用 Agent Loop API 失败: {str(e)}"
         execution_log.append(f"\n✗ {error_msg}")
@@ -797,43 +677,30 @@ async def _execute_testcase_via_chat_api(result: TestCaseResult):
 
         result.execution_log = "\n".join(execution_log)
         result.screenshots = screenshots
-        result.completed_at = timezone.now()
-
-        if result.started_at and result.completed_at:
-            result.execution_time = (result.completed_at - result.started_at).total_seconds()
-
-        await _save_result(result)
 
 
 @shared_task(name='testcases.cancel_test_execution')
+@transaction.atomic
 def cancel_test_execution(execution_id):
-    """
-    取消测试执行
-    
-    Args:
-        execution_id: TestExecution实例的ID
-    """
     try:
-        execution = TestExecution.objects.get(id=execution_id)
-        
-        if execution.status in ['pending', 'running']:
-            execution.status = 'cancelled'
-            execution.completed_at = timezone.now()
-            execution.save(update_fields=['status', 'completed_at', 'updated_at'])
-            
-            # 取消所有pending状态的测试用例结果
-            execution.results.filter(status='pending').update(
-                status='skip',
-                completed_at=timezone.now()
-            )
-            
-            logger.info(f"测试执行已取消: {execution_id}")
-            return {'success': True, 'message': '测试执行已取消'}
-        else:
-            return {'success': False, 'message': f'无法取消状态为 {execution.status} 的执行'}
-            
+        execution = TestExecution.objects.select_for_update().get(pk=execution_id)
     except TestExecution.DoesNotExist:
         return {'success': False, 'message': '测试执行记录不存在'}
-    except Exception as e:
-        logger.error(f"取消测试执行失败: {str(e)}", exc_info=True)
-        return {'success': False, 'message': str(e)}
+    if execution.status == 'cancelled':
+        return {'success': True, 'message': '测试执行已取消'}
+    if execution.status not in ('pending', 'running'):
+        return {'success': False, 'message': f'无法取消状态为 {execution.status} 的执行'}
+
+    if execution.status == 'pending':
+        _prepare_suite_results(execution)
+    now = timezone.now()
+    execution.results.filter(status__in=['pending', 'running']).update(
+        status='skip', completed_at=now, updated_at=now)
+    counts = dict(execution.results.order_by().values_list('status').annotate(n=Count('pk')))
+    for status, field in _RESULT_COUNTS.items():
+        setattr(execution, field, counts.get(status, 0))
+    execution.status = 'cancelled'
+    execution.completed_at = now
+    execution.total_count = sum(counts.values())
+    execution.save(update_fields=['status', 'completed_at', 'total_count', 'updated_at', *_RESULT_COUNTS.values()])
+    return {'success': True, 'message': '测试执行已取消', 'celery_task_id': execution.celery_task_id}

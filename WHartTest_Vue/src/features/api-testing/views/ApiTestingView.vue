@@ -7,7 +7,7 @@
       v-else
       v-model="activeTab"
       :tabs="tabItems"
-      :key="`api-testing-${locale}`"
+      :key="`api-testing-${locale}-${projectId}`"
     >
       <template #interfaces>
         <InterfacesPanel />
@@ -54,12 +54,10 @@ import EnvironmentsPanel from '../components/environments/EnvironmentsPanel.vue'
 import FunctionsPanel from '../components/functions/FunctionsPanel.vue'
 import SyncConfigPanel from '../components/sync-config/SyncConfigPanel.vue'
 import CardTabs from '../components/shared/CardTabs.vue'
-import { useApiTabsStore } from '../stores/apiTabsStore'
 
 const route = useRoute()
 const { locale, isEnglish, tl } = useAppI18n()
 const projectStore = useProjectStore()
-const apiTabsStore = useApiTabsStore()
 const themeStore = useThemeStore()
 const projectId = computed(() => projectStore.currentProjectId)
 const activeTab = ref('interfaces')
@@ -87,12 +85,6 @@ onBeforeUnmount(() => {
 watch(isDarkTheme, () => {
   syncApiTestingThemeClass()
 }, { immediate: true })
-
-watch(projectId, (newProjectId, oldProjectId) => {
-  if (newProjectId !== oldProjectId) {
-    apiTabsStore.clearInterfaceTabs()
-  }
-})
 
 // Support tab switching via query param (e.g. /api-testing?tab=testcases)
 watch(() => route.query.tab, (newTab) => {

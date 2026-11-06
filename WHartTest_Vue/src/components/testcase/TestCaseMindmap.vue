@@ -204,6 +204,7 @@ import quickCreateChildBtnMethods from 'simple-mind-map/src/core/render/node/qui
 import { Rect } from '@svgdotjs/svg.js';
 import 'simple-mind-map/dist/simpleMindMap.esm.css';
 import { useThemeStore } from '@/store/themeStore';
+import { useAuthStore } from '@/store/authStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 
 import type { TestCaseModule } from '@/services/testcaseModuleService';
@@ -283,7 +284,7 @@ expandBtnMethods.createExpandNodeContent = function patchedCreateExpandNodeConte
   const gap = EXPAND_COUNT_BADGE_GAP;
   // Prefer rx/ry over radius: modular Rect exports may not include the sugar radius() helper.
   const oldFill = this._fillExpandNode;
-  const rect = new Rect().size(size, size).rx(3).ry(3);
+  const rect = new Rect().size(size, size).attr({ rx: 3, ry: 3 });
   // Offset into the reserved slot so there is visible space between node and badge.
   rect.x(gap).y(-size / 2);
   rect.fill({ color: fillColor });
@@ -755,10 +756,8 @@ const isModuleOrRootSelected = computed(() => {
   return type === 'module' || type === 'root';
 });
 
-const isDeletableSelected = computed(() => {
-  const type = selectedNodeType.value;
-  return type === 'module' || type === 'case' || type === 'step' || type === 'expected' || type === 'precondition' || type === 'notes';
-});
+const authStore = useAuthStore();
+const isDeletableSelected = computed(() => isNodeDeletable(selectedNode.value));
 
 const isCaseSelected = computed(() => {
   return selectedNodeType.value === 'case';
@@ -1411,9 +1410,10 @@ const handleDirectSiblingCreate = (node: any) => {
 };
 
 const isNodeDeletable = (node: any): boolean => {
-  const payload = getNodePayload(node);
-  const type = payload?.type;
-  return type === 'module' || type === 'case' || type === 'step' || type === 'expected' || type === 'precondition' || type === 'notes';
+  const type = getNodePayload(node)?.type;
+  if (type === 'module') return authStore.hasPermission('testcases.delete_testcasemodule');
+  if (type === 'case') return authStore.hasPermission('testcases.delete_testcase');
+  return ['step', 'expected', 'precondition', 'notes'].includes(type || '') && authStore.hasPermission('testcases.change_testcase');
 };
 
 const handleDirectCreateShortcut = (key: string, nodeList: any[]) => {
@@ -1539,7 +1539,7 @@ const handleDirectCreateShortcut = (key: string, nodeList: any[]) => {
       handleDeleteSelectedNode(deletableNodes);
       return true; // 拦截组件默认行为
     }
-    return false;
+    return true;
   }
 
   // 2. 多选情况下，拦截其他新增相关的快捷键并提示
@@ -1626,7 +1626,7 @@ const handleCreateExpected = () => {
 
 const handleDeleteSelectedNode = (customNodes?: any[]) => {
   const nodes = customNodes || (selectedNode.value ? [selectedNode.value] : []);
-  if (nodes.length === 0) return;
+  if (!nodes.length || !nodes.every(isNodeDeletable)) return;
   closeContextMenu();
 
   // 1. 过滤出最顶层的被选中删除节点（如果父节点和其子节点同时被选中，只用删除父节点，避免冲突）

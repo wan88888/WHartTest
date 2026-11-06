@@ -2,7 +2,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APIClient
 from rest_framework import status
-from django.contrib.auth.models import User
+from django.contrib.auth.models import Permission, User
 from projects.models import Project, ProjectMember
 
 
@@ -62,6 +62,11 @@ class ProjectOwnerTests(TestCase):
             role='member'
         )
 
+        change_role = Permission.objects.get(content_type__app_label='projects', codename='change_projectmember')
+        self.owner.user_permissions.add(change_role)
+        self.admin.user_permissions.add(change_role)
+        self.member.user_permissions.add(change_role)
+
         # 设置API客户端
         self.client = APIClient()
 
@@ -105,6 +110,8 @@ class ProjectOwnerTests(TestCase):
         response = self.client.patch(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+        # 新拥有者执行下一次转移
+        self.client.force_authenticate(user=self.admin)
         # 再将普通成员设为拥有者
         data = {
             'user_id': self.member.id,
@@ -126,3 +133,43 @@ class ProjectOwnerTests(TestCase):
         owner_role = ProjectMember.objects.get(project=self.project, user=self.owner)
         self.assertEqual(admin_role.role, 'admin')
         self.assertEqual(owner_role.role, 'admin')
+
+    def test_transfer_requires_role_and_model_permission(self):
+        url = reverse('project-update-member-role', args=[self.project.id])
+        for actor in (self.admin, self.member):
+            with self.subTest(actor=actor.username):
+                self.client.force_authenticate(user=actor)
+                response = self.client.patch(url, {'user_id': self.new_owner.pk, 'role': 'owner'})
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.owner.user_permissions.clear()
+        self.client.force_authenticate(user=self.owner)
+        self.assertEqual(self.client.patch(url, {'user_id': self.member.pk, 'role': 'owner'}).status_code, 403)
+        self.assertEqual(self.project.members.get(role='owner').user_id, self.owner.pk)
+
+    def test_add_owner_transfers_existing_ownership(self):
+        add_member = Permission.objects.get(content_type__app_label='projects', codename='add_projectmember')
+        self.admin.user_permissions.add(add_member)
+        self.owner.user_permissions.add(add_member)
+        candidate = User.objects.create_user(username='candidate')
+        url = reverse('project-add-member', args=[self.project.pk])
+        payload = {'user_id': candidate.pk, 'role': 'owner'}
+        self.client.force_authenticate(user=self.admin)
+        self.assertEqual(self.client.post(url, payload).status_code, 403)
+        change_role = Permission.objects.get(content_type__app_label='projects', codename='change_projectmember')
+        self.owner.user_permissions.remove(change_role)
+        self.client.force_authenticate(user=User.objects.get(pk=self.owner.pk))
+        self.assertEqual(self.client.post(url, payload).status_code, 403)
+        self.owner.user_permissions.add(change_role)
+        self.client.force_authenticate(user=User.objects.get(pk=self.owner.pk))
+        self.assertEqual(self.client.post(url, payload).status_code, 201)
+        self.assertEqual(self.project.members.get(role='owner').user_id, candidate.pk)
+        self.assertEqual(self.project.members.get(user=self.owner).role, 'admin')
+
+    def test_superuser_cannot_leave_project_without_owner(self):
+        root = User.objects.create_superuser(username='root', password='test')
+        self.client.force_authenticate(user=root)
+        url = reverse('project-update-member-role', args=[self.project.pk])
+        self.assertEqual(self.client.patch(url, {'user_id': self.owner.pk, 'role': 'admin'}).status_code, 403)
+        url = reverse('project-remove-member', args=[self.project.pk])
+        self.assertEqual(self.client.delete(url, {'user_id': self.owner.pk}).status_code, 403)
+        self.assertEqual(self.project.members.get(role='owner').user_id, self.owner.pk)

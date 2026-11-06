@@ -55,6 +55,7 @@ def execute_scheduled_task(self, task_id: int, trigger_type: str = 'scheduled'):
 
             # 通过内部 API 触发批量执行（API 会创建记录并通过 WebSocket 通知执行器）
             import requests
+            from django.core import signing
             from rest_framework_simplejwt.tokens import RefreshToken
             from django.conf import settings as django_settings
 
@@ -75,6 +76,7 @@ def execute_scheduled_task(self, task_id: int, trigger_type: str = 'scheduled'):
                     'actuator_id': task.actuator_id,
                     'batch_name': f"定时任务-{task.name}",
                     'trigger_type': 'scheduled',
+                    'schedule_grant': signing.dumps([task.creator_id, task.id, execution.id, ui_case_ids], salt='ui.schedule'),
                     'scheduled_task_id': task.id,
                     'task_execution_id': execution.id,
                     'executor_id': task.creator.id,

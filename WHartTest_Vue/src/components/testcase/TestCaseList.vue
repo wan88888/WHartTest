@@ -71,7 +71,7 @@
         <a-button type="primary" @click="handleGenerateTestCases">{{ pageText.generateCases }}</a-button>
         <a-button type="primary" @click="handleAddTestCase">{{ pageText.addCase }}</a-button>
         <a-button
-          v-if="selectedTestCaseIds.length > 0"
+          v-if="canDeleteCases && selectedTestCaseIds.length > 0"
           type="primary"
           status="danger"
           @click="handleBatchDelete"
@@ -182,7 +182,7 @@
           <a-button type="primary" size="mini" @click.stop="handleEditTestCase(record)">{{ pageText.edit }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleExecuteTestCase(record)">{{ pageText.execute }}</a-button>
           <a-button type="outline" size="mini" @click.stop="handleCopyTestCase(record)">{{ pageText.copy }}</a-button>
-          <a-button type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
+          <a-button v-if="canDeleteCases" type="primary" status="danger" size="mini" @click.stop="handleDeleteTestCase(record)">{{ pageText.delete }}</a-button>
         </a-space>
       </template>
     </a-table>
@@ -246,6 +246,7 @@ import { ref, reactive, onMounted, onUnmounted, computed, watch, toRefs } from '
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconFolder, IconDownload, IconUpload, IconDown, IconCheckCircleFill, IconList, IconSync } from '@arco-design/web-vue/es/icon';
 import { useAppI18n } from '@/composables/useAppI18n';
+import { useAuthStore } from '@/store/authStore';
 import { useTestCaseExecutionQueue } from '@/composables/useTestCaseExecutionQueue';
 import ImportModal from '@/features/testcase-templates/components/ImportModal.vue';
 import ExportModal from '@/features/testcase-templates/components/ExportModal.vue';
@@ -288,6 +289,8 @@ const emit = defineEmits<{
 
 const { currentProjectId, selectedModuleId } = toRefs(props);
 const { isEnglish, tl } = useAppI18n();
+const authStore = useAuthStore();
+const canDeleteCases = computed(() => authStore.hasPermission('testcases.delete_testcase'));
 const { runningTasksCount } = useTestCaseExecutionQueue();
 
 const pageText = computed(() => (
@@ -522,23 +525,16 @@ const buildCurrentFilters = (): TestCaseNavigationFilters => ({
 });
 
 // 复选框选择相关的计算属性和方法
-// 获取当前页实际显示的数据
-const getCurrentPageData = () => {
-  const startIndex = (paginationConfig.current - 1) * paginationConfig.pageSize;
-  const endIndex = startIndex + paginationConfig.pageSize;
-  return testCaseData.value.slice(startIndex, endIndex);
-};
-
 // 当前页是否全选
 const isCurrentPageAllSelected = computed(() => {
-  const currentPageData = getCurrentPageData();
+  const currentPageData = testCaseData.value;
   if (currentPageData.length === 0) return false;
   return currentPageData.every(item => selectedTestCaseIds.value.includes(item.id));
 });
 
 // 当前页是否半选状态
 const isCurrentPageIndeterminate = computed(() => {
-  const currentPageData = getCurrentPageData();
+  const currentPageData = testCaseData.value;
   const currentPageSelectedCount = currentPageData.filter(item =>
     selectedTestCaseIds.value.includes(item.id)
   ).length;
@@ -561,27 +557,7 @@ const handleCheckboxChange = (id: number, checked: boolean) => {
 
 // 处理当前页全选/取消全选
 const handleSelectCurrentPage = (checked: boolean) => {
-  // 获取当前表格实际显示的数据
-  // Arco Table 会根据 pagination 配置自动切分数据显示
-  const startIndex = (paginationConfig.current - 1) * paginationConfig.pageSize;
-  const endIndex = startIndex + paginationConfig.pageSize;
-  const currentPageData = testCaseData.value.slice(startIndex, endIndex);
-  
-  if (checked) {
-    // 选中当前页所有项目
-    const currentPageIds = currentPageData.map(item => item.id);
-    currentPageIds.forEach(id => {
-      if (!selectedTestCaseIds.value.includes(id)) {
-        selectedTestCaseIds.value.push(id);
-      }
-    });
-  } else {
-    // 取消选中当前页所有项目
-    const currentPageIds = currentPageData.map(item => item.id);
-    selectedTestCaseIds.value = selectedTestCaseIds.value.filter(id =>
-      !currentPageIds.includes(id)
-    );
-  }
+  selectedTestCaseIds.value = checked ? testCaseData.value.map(item => item.id) : [];
 };
 
 const getSortOrder = (field: string): 'ascend' | 'descend' | '' => {

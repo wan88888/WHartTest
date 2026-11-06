@@ -311,7 +311,7 @@ def release_all_slots(actuator_id: Optional[str] = None) -> int:
         return total
 
 
-def adjust_busy_slots(actuator_id: str, delta: int) -> Optional[dict[str, Any]]:
+def adjust_busy_slots(actuator_id: str, delta: int, *, reservation: Optional[str] = None) -> Optional[dict[str, Any]]:
     """Adjust busy slots. Negative delta releases oldest leases first."""
     with _SLOT_LOCK:
         _reclaim_expired_leases_unlocked()
@@ -350,6 +350,7 @@ def adjust_busy_slots(actuator_id: str, delta: int) -> Optional[dict[str, Any]]:
                 (lid, lease)
                 for lid, lease in _leases_view().items()
                 if lease.get("actuator_id") == actuator_id
+                and (reservation is None or (lease.get("meta") or {}).get("reservation") == reservation)
             ),
             key=lambda item: float(item[1].get("created_at") or 0),
         )

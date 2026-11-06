@@ -1,3 +1,6 @@
+from urllib.parse import urlsplit
+
+from django.urls import reverse
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from .models import (
@@ -6,8 +9,18 @@ from .models import (
 )
 
 
+class RequirementFileField(serializers.FileField):
+    def to_representation(self, value):
+        if not value:
+            return None
+        url = reverse('requirement-documents-download-file', kwargs={'pk': value.instance.pk})
+        request = self.context.get('request')
+        return request.build_absolute_uri(url) if request else url
+
+
 class RequirementDocumentSerializer(serializers.ModelSerializer):
     """需求文档序列化器"""
+    file = RequirementFileField(required=False, allow_null=True)
     uploader_name = serializers.CharField(source='uploader.username', read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True)
     modules_count = serializers.SerializerMethodField()
@@ -18,10 +31,10 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
             'id', 'title', 'description', 'document_type', 'file', 'content',
             'status', 'error_message', 'version', 'is_latest', 'parent_document',
             'uploader', 'uploader_name', 'project', 'project_name',
-            'uploaded_at', 'updated_at', 'word_count', 'page_count',
+            'uploaded_at', 'updated_at', 'word_count', 'page_count', 'feishu_url',
             'has_images', 'image_count', 'modules_count'
         ]
-        read_only_fields = ['id', 'uploader', 'uploaded_at', 'updated_at']
+        read_only_fields = ['id', 'uploader', 'uploaded_at', 'updated_at', 'feishu_url']
 
     def get_modules_count(self, obj):
         """获取模块数量"""
@@ -31,6 +44,7 @@ class RequirementDocumentSerializer(serializers.ModelSerializer):
 class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
     """需求文档上传序列化器"""
 
+    file = RequirementFileField(required=False, allow_null=True)
     feishu_url = serializers.CharField(max_length=2048, write_only=True, required=False)
     feishu_code = serializers.CharField(max_length=2048, write_only=True, required=False)
     feishu_state = serializers.CharField(max_length=128, write_only=True, required=False)
@@ -66,7 +80,9 @@ class RequirementDocumentUploadSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("请使用完整的飞书文档链接并重新授权。")
             from .feishu_import import read_document
             content = read_document(self.context['request'], url, code, state)
-            data.update(content=content, document_type='txt', word_count=len(content))
+            source = urlsplit(url.strip())
+            data.update(content=content, document_type='txt', word_count=len(content),
+                        feishu_url=f'https://{source.hostname}{source.path}')
         if not data.get('file') and not data.get('content'):
             raise serializers.ValidationError("必须提供文件或文档内容")
         return data

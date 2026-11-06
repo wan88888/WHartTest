@@ -49,6 +49,25 @@ services:
     command: redis-server --appendonly yes
 
   # 后端 Django 服务（包含Celery Worker和Beat）
+  function-sandbox:
+    build:
+      context: ./WHartTest_Django/function_sandbox
+      args:
+        PYTHON_BASE_IMAGE: ${DOCKER_PYTHON_BASE_IMAGE:-python:3.11-slim}
+    network_mode: none
+    read_only: true
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 16
+    cpus: 1
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=2m
+    volumes:
+      - function-socket:/run/whart-functions
+    restart: unless-stopped
+
   backend:
     # 本地构建模式
     build:
@@ -68,6 +87,7 @@ services:
       - "0.0.0.0:8912:8000"
     volumes:
       - ./data:/app/data
+      - function-socket:/run/whart-functions:ro
       - backend-static:/app/static
       - ./WHartTest_Skills:/app/bundled_skills:ro
     extra_hosts:
@@ -129,6 +149,8 @@ services:
       # 必须用容器网络内可达的地址（compose 服务名 backend）
       - WHARTTEST_RUNNER_BACKEND_URL=${WHARTTEST_RUNNER_BACKEND_URL:-http://backend:8000}
     depends_on:
+      function-sandbox:
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:
@@ -438,6 +460,7 @@ networks:
     driver: bridge
 
 volumes:
+  function-socket:
   backend-static:
   redis-data:
   postgres-data:

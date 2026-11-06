@@ -373,7 +373,7 @@ export interface UiAuthState extends TimeStampFields {
   env_config: number
   env_name?: string
   project_id?: number
-  state_json?: Record<string, unknown>
+  credential_summary?: { invalid?: boolean; expires: number | null; cookies: number; local_storage: number; session_storage: number }
   is_active: boolean
   description: string
   creator: number | null

@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import viewsets, permissions, status, filters
 from django_filters.rest_framework import (
     DjangoFilterBackend,
@@ -266,7 +268,6 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         try:
             excel_data, filename = export_service.export(queryset, project.name)
         except Exception as e:
-            import logging
 
             logging.getLogger(__name__).exception("导出Excel失败")
             return Response(
@@ -436,6 +437,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=["post"], url_path="batch-delete")
+    @permission_required("testcases.delete_testcase")
     def batch_delete(self, request, **kwargs):
         """
         批量删除用例
@@ -745,6 +747,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=["post"], url_path="bind-ui-testcase")
+    @permission_required("testcases.change_testcase")
     def bind_ui_testcase(self, request, project_pk=None, pk=None):
         """
         绑定或解绑 UI 自动化用例
@@ -775,6 +778,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="diagnose-failure")
+    @permission_required("testcases.view_testcase")
     def diagnose_failure(self, request, project_pk=None, pk=None):
         """
         AI 失败归因诊断接口
@@ -783,6 +787,8 @@ class TestCaseViewSet(viewsets.ModelViewSet):
         """
         from .ai_diagnosis_service import diagnose_execution_failure
         testcase = self.get_object()
+        if not request.user.has_perm("ui_automation.view_uiexecutionrecord"):
+            return Response({"error": "缺少查看 UI 执行记录的权限"}, status=403)
         ui_record_id = request.data.get("ui_execution_record_id")
 
         try:
@@ -804,6 +810,7 @@ class TestCaseViewSet(viewsets.ModelViewSet):
             )
 
     @action(detail=True, methods=["post"], url_path="apply-healing")
+    @permission_required("ui_automation.change_uielement")
     def apply_healing(self, request, project_pk=None, pk=None):
         """
         一键应用 AI 自愈建议，回写 UI 元素定位配置
@@ -1107,6 +1114,7 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
     API 端点将嵌套在项目下，例如 /api/projects/{project_pk}/test-executions/
     """
 
+    http_method_names = ["get", "post", "delete", "head", "options"]
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ["suite__name"]
     ordering_fields = ["created_at", "started_at", "completed_at", "status"]
@@ -1197,25 +1205,17 @@ class TestExecutionViewSet(viewsets.ModelViewSet):
         from celery import current_app
 
         execution = self.get_object()
+        result = cancel_test_execution(execution.pk)
+        if not result['success']:
+            return Response({'error': result['message']}, status=status.HTTP_400_BAD_REQUEST)
 
-
-
-        if execution.status not in ["pending", "running"]:
-            return Response(
-                {"error": f"无法取消状态为 {execution.get_status_display()} 的执行"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # 尝试撤销Celery任务
-        if execution.celery_task_id:
-            current_app.control.revoke(execution.celery_task_id, terminate=True)
-
-        # 调用取消任务
-        cancel_test_execution.delay(execution.id)
-
-        return Response(
-            {"message": "测试执行取消请求已发送"}, status=status.HTTP_200_OK
-        )
+        task_id = result.get('celery_task_id')
+        if task_id:
+            try:
+                current_app.control.revoke(task_id, terminate=True)
+            except Exception:
+                logging.getLogger(__name__).exception("取消状态已保存，未能通知 Celery 停止执行 %s", execution.pk)
+        return Response({'message': result['message']})
 
     @action(detail=True, methods=["get"], url_path="results")
     def results(self, request, project_pk=None, pk=None):

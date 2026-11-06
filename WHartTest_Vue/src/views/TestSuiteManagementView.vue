@@ -20,7 +20,7 @@
             @search="handleSearch"
             @clear="handleSearch"
           />
-          <a-button type="primary" @click="handleCreate" style="margin-left: 12px">
+          <a-button type="primary" v-if="authStore.hasPermission('testcases.add_testsuite')" @click="handleCreate" style="margin-left: 12px">
             <template #icon>
               <icon-plus />
             </template>
@@ -62,20 +62,20 @@
         </template>
         <template #operations="{ record }">
           <a-space :size="8">
-            <a-button type="primary" size="small" @click="handleExecute(record)">
+            <a-button type="primary" size="small" v-if="authStore.hasPermission('testcases.add_testexecution')" @click="handleExecute(record)">
               <template #icon>
                 <icon-play-arrow />
               </template>
               {{ pageText.execute }}
             </a-button>
-            <a-button type="outline" size="small" @click="handleEdit(record)">
+            <a-button type="outline" size="small" v-if="authStore.hasPermission('testcases.change_testsuite')" @click="handleEdit(record)">
               {{ pageText.edit }}
             </a-button>
             <a-button
               type="primary"
               status="danger"
               size="small"
-              @click="handleDelete(record)"
+              v-if="authStore.hasPermission('testcases.delete_testsuite')" @click="handleDelete(record)"
             >
               {{ pageText.delete }}
             </a-button>
@@ -115,6 +115,7 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import { IconPlus, IconPlayArrow, IconFolder } from '@arco-design/web-vue/es/icon';
+import { useAuthStore } from '@/store/authStore';
 import { useProjectStore } from '@/store/projectStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import {
@@ -127,6 +128,7 @@ import TestSuiteFormModal from '@/components/testcase/TestSuiteFormModal.vue';
 import TestExecutionConfirmModal from '@/components/testcase/TestExecutionConfirmModal.vue';
 import TestSuiteDetailModal from '@/components/testcase/TestSuiteDetailModal.vue';
 
+const authStore = useAuthStore();
 const projectStore = useProjectStore();
 const { isEnglish } = useAppI18n();
 const currentProjectId = computed(() => projectStore.currentProjectId);

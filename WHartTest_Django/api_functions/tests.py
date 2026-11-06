@@ -1,4 +1,8 @@
+from unittest.mock import patch
+
 from django.test import TestCase
+
+from .runtime import SandboxUnavailable
 from django.contrib.auth.models import User, Permission
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.test import APIClient
@@ -323,7 +327,8 @@ class ApiCustomFunctionAPITest(TestCase):
         self.assertNotIn('inactive_func', content)
         self.assertIn('auto-generated', content)
 
-    def test_execute_valid_function(self):
+    @patch('api_functions.views.call_function', return_value='3')
+    def test_execute_valid_function(self, call):
         """测试执行有效函数"""
         data = {
             'code': 'def add(a, b):\n    return a + b',
@@ -332,8 +337,10 @@ class ApiCustomFunctionAPITest(TestCase):
         response = self.client.post(f'{self.base_url}execute/', data, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['result'], '3')
+        call.assert_called_once_with(data['code'], None, (), data['test_args'], display=True)
 
-    def test_execute_no_args(self):
+    @patch('api_functions.views.call_function', return_value='world')
+    def test_execute_no_args(self, call):
         """测试执行无参数函数"""
         data = {
             'code': 'def hello():\n    return "world"',
@@ -342,13 +349,20 @@ class ApiCustomFunctionAPITest(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['result'], 'world')
 
+    @patch('api_functions.views.call_function', side_effect=SandboxUnavailable('offline'))
+    def test_execute_sandbox_unavailable(self, call):
+        response = self.client.post(f'{self.base_url}execute/', {'code': 'def f(): return 1'}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        call.assert_called_once()
+
     def test_execute_missing_code(self):
         """测试执行时缺少 code 字段"""
         response = self.client.post(f'{self.base_url}execute/', {}, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('code', response.data['detail'].lower())
 
-    def test_execute_invalid_code(self):
+    @patch('api_functions.views.call_function', side_effect=ValueError('syntax error'))
+    def test_execute_invalid_code(self, call):
         """测试执行语法错误的代码"""
         data = {'code': 'def bad(\n    return'}
         response = self.client.post(f'{self.base_url}execute/', data, format='json')
@@ -450,7 +464,8 @@ class ApiCustomFunctionPermissionTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_execute_allowed_for_admin(self):
+    @patch('api_functions.views.call_function', return_value='1')
+    def test_execute_allowed_for_admin(self, call):
         """测试项目管理员可以执行函数"""
         self.client.force_authenticate(user=self.user_b)  # role=admin
         data = {'code': 'def test():\n    return 1'}
@@ -461,7 +476,8 @@ class ApiCustomFunctionPermissionTest(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    def test_execute_allowed_for_superuser(self):
+    @patch('api_functions.views.call_function', return_value='42')
+    def test_execute_allowed_for_superuser(self, call):
         """测试超级管理员可以执行函数"""
         self.client.force_authenticate(user=self.superuser)
         data = {'code': 'def test():\n    return 42'}
@@ -564,7 +580,19 @@ class LoadCustomFunctionsTest(TestCase):
         self.assertIn('add', functions)
         self.assertNotIn('x', functions)
 
-    def test_loaded_function_callable(self):
+    def test_numeric_hook_refuses_another_projects_function(self):
+        from types import SimpleNamespace
+        from httprunner.step_request import call_hooks
+        func = ApiCustomFunction.objects.create(
+            name='hook', code='def hook(): return 1', project=self.project, created_by=self.user,
+        )
+        other = Project.objects.create(name='Other project', creator=self.user)
+        runner = SimpleNamespace(interface_data={'project_id': other.pk})
+        with self.assertRaisesRegex(ValueError, '执行项目钩子函数'):
+            call_hooks(runner, [str(func.pk)], {}, 'setup')
+
+    @patch('api_functions.runtime.call_function', return_value=12)
+    def test_loaded_function_callable(self, call):
         """加载的函数可以被正常调用"""
         ApiCustomFunction.objects.create(
             name='multiply',
@@ -576,6 +604,7 @@ class LoadCustomFunctionsTest(TestCase):
         from api_interfaces.runner import load_custom_functions
         functions = load_custom_functions(self.project.pk)
         self.assertEqual(functions['multiply'](3, 4), 12)
+        call.assert_called_once_with('def multiply(a, b):\n    return a * b', 'multiply', (3, 4), {})
 
 
 class ApiCustomFunctionPaginationTest(TestCase):

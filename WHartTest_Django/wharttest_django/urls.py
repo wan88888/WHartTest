@@ -194,7 +194,20 @@ urlpatterns = [
 ]
 
 # 追加媒体文件访问路由（开发/容器环境使用）。
-urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+def serve_public_media(request, path):
+    from pathlib import Path
+    from django.http import Http404
+    from django.views.static import serve
+
+    root = Path(settings.MEDIA_ROOT).resolve()
+    target = (root / path).resolve()
+    private = ('requirement_documents', 'ui_execution_artifacts', 'ui_traces', 'ui_screenshots')
+    if not target.is_relative_to(root) or any(target.is_relative_to(root / name) for name in private):
+        raise Http404
+    return serve(request, path, document_root=root)
+
+
+urlpatterns += static(settings.MEDIA_URL, view=serve_public_media)
 
 
 # 追加静态文件访问路由。

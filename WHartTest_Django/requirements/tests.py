@@ -492,10 +492,45 @@ class RequirementDocumentImageAccessTests(TestCase):
             "requirement-documents-get-image",
             kwargs={"pk": self.document.id, "image_id": "img_000"},
         )
+        self.assertEqual(self.client.get(url).status_code, 401)
+        view = Permission.objects.get(codename="view_requirementdocument")
+        outsider = User.objects.create_user("outside-image-project")
+        outsider.user_permissions.add(view)
+        self.client.force_authenticate(outsider)
+        self.assertIn(self.client.get(url).status_code, (403, 404))
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.user.user_permissions.add(view)
+        self.client.force_authenticate(User.objects.get(pk=self.user.pk))
         response = self.client.get(url)
+        self.assertIn("no-store", response["Cache-Control"])
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(b"".join(response.streaming_content), b"new")
+
+
+    def test_requirement_media_is_only_available_via_document_api(self):
+        from django.http import Http404
+        from django.test import RequestFactory
+        from wharttest_django.urls import serve_public_media
+
+        self.document.file.save("source.docx", SimpleUploadedFile("source.docx", b"original"))
+        image = DocumentImage.objects.create(
+            document=self.document, image_id="img_000", order=0,
+            image_file=SimpleUploadedFile("image.png", b"private-image"),
+        )
+        for stored in (self.document.file, image.image_file):
+            with self.assertRaises(Http404):
+                serve_public_media(RequestFactory().get(stored.url), stored.name)
+            self.assertEqual(self.client.get(stored.url).status_code, 404)
+
+        self.user.user_permissions.add(Permission.objects.get(codename="view_requirementdocument"))
+        self.client.force_authenticate(self.user)
+        detail = self.client.get(reverse("requirement-documents-detail", kwargs={"pk": self.document.pk}))
+        self.assertEqual(detail.status_code, 200)
+        response = self.client.get(detail.data["file"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"original")
 
 
 class ReviewFailureHonestyTests(TestCase):

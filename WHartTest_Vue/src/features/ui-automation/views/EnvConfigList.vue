@@ -319,40 +319,19 @@ const formatAuthTime = (value?: string | null): string => {
 
 /** 登录态最短 cookie 过期时间：字符显示 + 过期判断（会话型 cookie 视为长期有效） */
 const authExpiryText = (record: UiAuthState): string => {
-  const state = record.state_json || {}
-  const cookies = Array.isArray(state.cookies) ? state.cookies : []
-  let min: number | null = null
-  for (const c of cookies) {
-    const e = Number(c?.expires)
-    if (Number.isFinite(e) && e > 0 && (min === null || e < min)) min = e
-  }
-  if (min === null) return '会话型（长期）'
-  const d = new Date(min * 1000)
-  if (Number.isNaN(d.getTime())) return '-'
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  if (record.credential_summary?.invalid) return '—'
+  const expiry = record.credential_summary?.expires
+  return expiry ? formatAuthTime(new Date(expiry * 1000).toISOString()) : '会话型'
 }
 
-const isAuthExpired = (record: UiAuthState): boolean => {
-  const state = record.state_json || {}
-  const cookies = Array.isArray(state.cookies) ? state.cookies : []
-  for (const c of cookies) {
-    const e = Number(c?.expires)
-    if (Number.isFinite(e) && e > 0 && e * 1000 < Date.now()) return true
-  }
-  return false
-}
+const isAuthExpired = (record: UiAuthState) =>
+  Boolean(record.credential_summary?.expires && record.credential_summary.expires * 1000 < Date.now())
 
 const credentialSummary = (record: UiAuthState) => {
-  const state = record.state_json || {}
-  const cookies = Array.isArray(state.cookies) ? state.cookies.length : 0
-  const origins = Array.isArray(state.origins) ? state.origins : []
-  const lsKeys = origins.reduce(
-    (sum: number, o: Record<string, unknown>) => sum + (Array.isArray(o.localStorage) ? o.localStorage.length : 0),
-    0,
-  )
-  if (!cookies && !lsKeys) return '无凭据'
-  return `cookies=${cookies}, localStorage=${lsKeys}`
+  const summary = record.credential_summary
+  if (summary?.invalid) return '登录态格式异常，请重新录制'
+  if (!summary || !(summary.cookies || summary.local_storage || summary.session_storage)) return '无凭据'
+  return `cookies=${summary.cookies}, localStorage=${summary.local_storage}, sessionStorage=${summary.session_storage}`
 }
 
 const fetchAuthStates = async () => {

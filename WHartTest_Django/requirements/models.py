@@ -59,6 +59,7 @@ class RequirementDocument(models.Model):
         null=True
     )
     content = models.TextField(_('文档内容'), blank=True, null=True)
+    feishu_url = models.URLField(_('飞书原文链接'), max_length=2048, blank=True, default='')
 
     # 状态管理
     status = models.CharField(

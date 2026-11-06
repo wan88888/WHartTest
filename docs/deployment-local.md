@@ -20,7 +20,7 @@ docker compose start
 源码修改后重新构建：
 
 ```bash
-docker compose build backend frontend weixin-plugin-host actuator
+docker compose build backend frontend weixin-plugin-host actuator function-sandbox
 docker compose up -d
 bash deploy-scripts/init-local.sh
 ```
@@ -34,6 +34,12 @@ bash deploy-scripts/init-local.sh
 这是本机开发部署，仅开放回环地址的 8913（前端）和 8912（后端）端口，沿用本地配置的 Django 调试模式。Docker Desktop 启动后，已有容器会按 `unless-stopped` 策略恢复。
 
 大模型和知识库模型需要在平台配置相应服务地址与 API Key；独立 Docx 编辑服务不包含在本仓库的默认部署栈中。MCP 兼容服务保留为可选 profile。
+
+## 接口自定义函数
+
+`function-sandbox` 独立执行函数试运行、已保存函数和接口钩子。Django 通过专用 Unix 套接字卷提交函数代码和本次调用的参数。容器关闭网络、不挂载业务数据，以普通用户运行；每次调用启动独立进程，seccomp 限制系统调用，并限制 CPU 为 2 秒、实际执行为 4 秒、进程地址空间为 128 MiB、输入输出各为 128 KiB。隔离服务离线时，试运行返回 503。
+
+适合 JSON 参数与结果的纯计算函数，可使用预加载的常用标准库（如 `json`、`hashlib`、`hmac`、`datetime`、`random`、`re`、`uuid`）。读写文件、网络、创建子进程、加载额外依赖或依赖跨调用全局状态的旧函数需要调整。独立部署 Django 与 Celery 时，把同一个套接字目录挂载给其运行进程，可用 `FUNCTION_SANDBOX_SOCKET` 指定路径。请使用此仓库的 Linux 容器启动执行器，以应用同等内核限制。
 
 ## 飞书登录
 

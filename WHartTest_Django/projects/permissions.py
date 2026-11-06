@@ -125,3 +125,7 @@ class HasProjectMemberPermission(HasModelPermission):
         """
         # 将成员管理动作固定映射到 projects.projectmember 模型权限编码。
         return ProjectMember, 'projects', 'projectmember'
+
+    def has_object_permission(self, request, view, obj):
+        # The nested route resolves a Project, but this action operates on ProjectMember.
+        return self.has_permission(request, view)

@@ -120,7 +120,7 @@
             </a-button>
             
             <a-button
-              v-if="record.status === 'running'"
+              v-if="record.status === 'running' && authStore.hasPermission('testcases.add_testexecution')"
               type="outline"
               status="warning"
               size="small"
@@ -135,7 +135,7 @@
             <a-button
               type="text"
               size="small"
-              @click="handleDelete(record)"
+              v-if="authStore.hasPermission('testcases.delete_testexecution')" @click="handleDelete(record)"
               status="danger"
             >
               {{ pageText.delete }}
@@ -165,6 +165,7 @@ import {
   IconClose,
   IconFolder,
 } from '@arco-design/web-vue/es/icon';
+import { useAuthStore } from '@/store/authStore';
 import { useProjectStore } from '@/store/projectStore';
 import { useAppI18n } from '@/composables/useAppI18n';
 import {
@@ -176,6 +177,7 @@ import {
 import { formatDate } from '@/utils/formatters';
 import TestExecutionReportModal from '@/components/testcase/TestExecutionReportModal.vue';
 
+const authStore = useAuthStore();
 const projectStore = useProjectStore();
 const { isEnglish } = useAppI18n();
 const currentProjectId = computed(() => projectStore.currentProjectId);

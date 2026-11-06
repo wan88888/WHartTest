@@ -68,6 +68,7 @@
           status="success"
           :disabled="selectedRowKeys.length === 0 || executingIds.length > 0"
           :loading="executingIds.length > 0"
+          v-if="authStore.hasPermission('ui_automation.add_uiexecutionrecord')"
           @click="runBatchTestCases"
         >
           <template #icon><icon-thunderbolt /></template>
@@ -135,6 +136,7 @@
             size="mini"
             :loading="isExecuting(record.id)"
             :disabled="isExecuting(record.id)"
+            v-if="authStore.hasPermission('ui_automation.add_uiexecutionrecord')"
             @click="runTestCase(record)"
           >
             <template #icon><icon-play-arrow /></template>
@@ -260,6 +262,7 @@ import { useAppI18n } from '@/composables/useAppI18n'
 import { testCaseApi, moduleApi, actuatorApi, envConfigApi, type ActuatorInfo } from '../api'
 import type { UiTestCase, UiTestCaseForm, UiModule, CaseLevel, ExecutionStatus, UiEnvironmentConfig } from '../types'
 import { STATUS_LABELS, extractListData, extractPaginationData, extractResponseData } from '../types'
+import { useAuthStore } from '@/store/authStore'
 import { uiWebSocket, UiSocketEnum, type CaseResultModel } from '../services/websocket'
 import CaseStepList from './CaseStepList.vue'
 import { fetchLatestFailureRecord, buildSelfHealMessage, startSelfHealTask } from '../services/uiSelfHeal'
@@ -448,6 +451,7 @@ const pageText = computed(() => (
 
 const loading = ref(false)
 const submitting = ref(false)
+const authStore = useAuthStore()
 const executingIds = ref<number[]>([]) // 正在执行的用例ID列表
 const healingIds = ref<number[]>([]) // 正在 AI 自愈的用例ID列表
 
@@ -1067,6 +1071,7 @@ const fetchActuators = async (options: { resetSelected?: boolean } = {}) => {
 }
 
 /** WebSocket 事件监听 */
+let offDispatchError: (() => void) | undefined
 let offCaseResult: (() => void) | null = null
 let offEffectiveRuntime: (() => void) | null = null
 
@@ -1121,6 +1126,16 @@ defineExpose({ refresh })
 
 onMounted(() => {
   // 监听用例执行结果
+  offDispatchError = uiWebSocket.on('*', message => {
+    if (message.code === 200 || ![UiSocketEnum.TEST_CASE, UiSocketEnum.TEST_CASE_BATCH].includes(message.data?.func_name as any)) return
+    const args = message.data?.func_args || {}
+    const ids = args.case_ids || [args.case_id]
+    if (!ids.some((id: number) => executingIds.value.includes(id))) return
+    executingIds.value = executingIds.value.filter(id => !ids.includes(id))
+    pendingScreenCaseId.value = null
+    execScreenVisible.value = false
+    Message.error(message.msg)
+  })
   offCaseResult = uiWebSocket.on(UiSocketEnum.CASE_RESULT, handleCaseResult)
   // 监听生效运行时回执（决定是否弹执行画面）
   offEffectiveRuntime = uiWebSocket.on(UiSocketEnum.EFFECTIVE_RUNTIME, handleEffectiveRuntime)
@@ -1128,6 +1143,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   // 清理事件监听
+  offDispatchError?.()
   offCaseResult?.()
   offEffectiveRuntime?.()
 })

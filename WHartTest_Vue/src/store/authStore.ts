@@ -8,6 +8,7 @@ import {
 } from '@/services/authService';
 import { getUserPermissions } from '@/services/permissionService';
 import { useStorage } from '@vueuse/core';
+import { resetExecutionQueue } from '@/composables/useTestCaseExecutionQueue';
 import { useProjectStore } from '@/store/projectStore';
 
 // 用户信息结构
@@ -18,6 +19,7 @@ interface User {
   first_name: string;
   last_name: string;
   is_staff: boolean;
+  is_superuser?: boolean;
   is_active: boolean;
   groups: any[];
   display_name?: string;
@@ -91,6 +93,7 @@ export const useAuthStore = defineStore('auth', {
   
   actions: {
     acceptSession(data: ApiTokenResponseData) {
+      resetExecutionQueue();
       this.isAuthenticated = true;
       // 存储API返回的用户信息
       this.user = data.user;
@@ -153,6 +156,7 @@ export const useAuthStore = defineStore('auth', {
       }
     },
     logout() {
+      resetExecutionQueue();
       this.isAuthenticated = false;
       this.user = null;
       this.accessToken = null;
@@ -245,8 +249,8 @@ export const useAuthStore = defineStore('auth', {
         return false;
       }
       
-      // 管理员拥有所有权限
-      if (this.user.is_staff) {
+      // Staff accounts use their effective user and group permissions.
+      if (this.user.is_superuser) {
         return true;
       }
       
@@ -297,8 +301,10 @@ export const useAuthStore = defineStore('auth', {
         return;
       }
       
+      const userId = this.user.id;
       try {
-        const response = await getUserPermissions(this.user.id);
+        const response = await getUserPermissions(userId);
+        if (this.user?.id !== userId) return;
         if (response.success && response.data) {
           // 直接存储权限对象数组，不再转换为字符串
           this.setUserPermissions(response.data);
@@ -310,6 +316,7 @@ export const useAuthStore = defineStore('auth', {
           console.warn('获取用户权限失败或无权限数据:', response.error || '无数据');
         }
       } catch (error) {
+        if (this.user?.id !== userId) return;
         // 接口报错时，清空权限（安全策略）
         this.setUserPermissions([]);
         console.error('获取用户权限失败:', error);

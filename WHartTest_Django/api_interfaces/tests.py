@@ -3068,7 +3068,8 @@ class ApiInterfaceRunnerTest(TestCase):
         mock_load_funcs.assert_called_once_with(self.project.pk)
         self.assertIn('add', runner.functions)
 
-    def test_load_custom_functions(self):
+    @patch('api_functions.runtime.call_function', return_value='Hello, World')
+    def test_load_custom_functions(self, call):
         """测试 load_custom_functions 加载自定义函数"""
         from api_functions.models import ApiCustomFunction
         from .runner import load_custom_functions

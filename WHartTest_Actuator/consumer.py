@@ -52,6 +52,11 @@ class TaskConsumer:
         # 原样回显，供后端 verify_result_source 做"任务确实下发给本执行器"的
         # 一一对应强校验。路由任务时摘取，回传时自动附带并清除。
         self._task_token: Optional[str] = None
+        self._auth_snapshots = {}
+        self._run_stops = {}
+        self._active_handler = None
+        self._active_kind = None
+        self._outstanding = set()
         
         # 从配置创建执行器
         executor_config = {}
@@ -82,7 +87,7 @@ class TaskConsumer:
                 'trace_sources': getattr(config, 'trace_sources', False),
             }
         self.executor = PlaywrightExecutor(**executor_config)
-        self.task_queue: asyncio.Queue[QueueModel] = asyncio.Queue()
+        self.task_queue: asyncio.Queue[tuple[QueueModel, Optional[str]]] = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._current_user: Optional[str] = None
         # 执行画面帧推流状态（仅单任务执行使用）
@@ -250,7 +255,7 @@ class TaskConsumer:
                     step.screenshot = None
         return result
     
-    async def _upload_trace_file(self, trace_path: str) -> Optional[str]:
+    async def _upload_trace_file(self, trace_path: str, case_id: int) -> Optional[str]:
         """上传 Trace 文件到服务器，成功后清理本地文件
 
         Returns:
@@ -276,7 +281,7 @@ class TaskConsumer:
                     response = await client.post(
                         url,
                         headers=headers,
-                        files=files,
+                        files=files, data={'test_case': str(case_id)},
                         timeout=60.0  # Trace 文件可能较大
                     )
                 if response.status_code == 201:
@@ -349,8 +354,6 @@ class TaskConsumer:
             logger.debug(f"收到通知消息: {socket_data.msg}")
             return
         
-        # 记录发起用户
-        self._current_user = socket_data.user
 
         # 停止请求不经任务队列：任务队列被长任务占用时（单消费者串行），
         # 入队的停止请求要等当前任务结束才被处理——在接收循环立即执行，
@@ -363,11 +366,14 @@ class TaskConsumer:
             return
 
         # 添加到任务队列
-        await self.add_task(socket_data.data)
+        await self.add_task(socket_data.data, socket_data.user)
     
-    async def add_task(self, task: QueueModel):
+    async def add_task(self, task: QueueModel, user=None):
         """添加任务到队列"""
-        await self.task_queue.put(task)
+        token = task.func_args.get('task_token')
+        if token:
+            self._run_stops[token] = set()
+        await self.task_queue.put((task, user))
         logger.info(f"任务已入队: {task.func_name}")
     
     async def process_tasks(self):
@@ -375,7 +381,7 @@ class TaskConsumer:
         while not self._stop_event.is_set():
             try:
                 # 等待任务
-                task = await asyncio.wait_for(
+                task, self._current_user = await asyncio.wait_for(
                     self.task_queue.get(),
                     timeout=1.0
                 )
@@ -389,6 +395,11 @@ class TaskConsumer:
             except Exception as e:
                 logger.error(f"处理任务错误: {e}", exc_info=True)
     
+    async def _send_result(self, kind, data, user=None, **kwargs):
+        await self.ws_client.send_result(kind, data, user or self._current_user, **kwargs)
+        if kind in (UiSocketEnum.CASE_RESULT, UiSocketEnum.PAGE_STEP_RESULT):
+            self._outstanding.discard(data.get('case_id') or data.get('page_step_id'))
+
     async def _route_task(self, task: QueueModel):
         """路由任务到对应处理器"""
         handlers = {
@@ -405,9 +416,36 @@ class TaskConsumer:
             # 同步到 ws_client，send_result 回传所有结果时自动附带回显
             self._task_token = task.func_args.get('task_token') if isinstance(task.func_args, dict) else None
             self.ws_client.set_task_token(self._task_token)
+            args = task.func_args
+            self._auth_snapshots = args.pop('auth_snapshots', {})
+            self._active_kind = task.func_name
+            page = task.func_name == UiSocketEnum.PAGE_STEPS
+            ids = args.get('case_ids') or [args.get('case_id') or args.get('page_step_id')]
+            self._outstanding = {i for i in ids if i}
+            stops = self._run_stops.get(self._task_token, set())
+            error = '执行器未能完成执行'
             try:
-                await handler(task.func_args)
+                if task.func_name == UiSocketEnum.TEST_CASE_BATCH:
+                    args = {**args, 'case_ids': [i for i in ids if i not in stops]}
+                if not self._outstanding or self._outstanding - stops:
+                    self._active_handler = asyncio.create_task(handler(args))
+                    await self._active_handler
+            except asyncio.CancelledError:
+                if not stops:
+                    raise
+            except Exception as exc:
+                logger.exception("执行任务失败")
+                error = str(exc)
             finally:
+                for target in list(self._outstanding):
+                    stopped = target in stops
+                    await self._send_result(UiSocketEnum.PAGE_STEP_RESULT if page else UiSocketEnum.CASE_RESULT,
+                        {('page_step_id' if page else 'case_id'): target,
+                         'status': 'skipped' if stopped else 'failed', 'message': '任务已停止' if stopped else error})
+                self._run_stops.pop(self._task_token, None)
+                self._auth_snapshots = {}
+                self._active_kind = None
+                self._active_handler = None
                 self._task_token = None
                 self.ws_client.set_task_token(None)
         else:
@@ -608,9 +646,9 @@ class TaskConsumer:
                 if auth_state_id:
                     step_auth_ids.append(auth_state_id)
             for auth_state_id in step_auth_ids:
-                auth_data = await self._api_get(f"/api/ui-automation/auth-states/{auth_state_id}/")
+                auth_data = self._auth_snapshots.get(str(auth_state_id))
                 if auth_data is None:
-                    continue
+                    return effective_env, "步骤绑定登录态已变更，请重新执行"
                 auth_env_id = auth_data.get('env_config')
                 if auth_env_id and str(auth_env_id) != str(effective_env_id):
                     return (
@@ -626,14 +664,12 @@ class TaskConsumer:
         （不注入，也不回落环境生效登录态）——用例内未绑定步骤执行器按"向上匹配"
         沿用上一个已绑定步骤的登录态。"""
         if auth_state_id:
-            try:
-                data = await self._api_get(f"/api/ui-automation/auth-states/{auth_state_id}/")
-            except Exception as exc:
-                logger.warning(f"拉取步骤绑定登录态失败: {exc}")
-                data = None
-            if isinstance(data, dict) and isinstance(data.get('state_json'), dict):
-                logger.info(f"使用步骤绑定登录态 auth_state_id={auth_state_id}")
-                return {'storage_state': data['state_json']}
+            data = self._auth_snapshots.get(str(auth_state_id))
+            if not data or not isinstance(data.get('state_json'), dict):
+                raise ValueError('步骤绑定登录态已变更，请重新执行')
+            if env_config_id and str(data['env_config']) != str(env_config_id):
+                raise ValueError('步骤绑定登录态与执行环境不一致')
+            return {'storage_state': data['state_json']}
         return None
 
     async def _runtime_for_executor(self, effective: dict, args: dict | None = None) -> dict:
@@ -706,7 +742,7 @@ class TaskConsumer:
             }
             if self._task_token:
                 frame_args['task_token'] = self._task_token
-            await self.ws_client.send_result(
+            await self._send_result(
                 UiSocketEnum.EXEC_FRAME,
                 frame_args,
                 self._current_user,
@@ -731,6 +767,7 @@ class TaskConsumer:
         # 获取环境配置
         env_config = None
         base_url = ''
+        project_id = page_step_data.get('project')
         if env_config_id:
             env_config = await self._fetch_env_config(env_config_id)
         else:
@@ -759,7 +796,7 @@ class TaskConsumer:
         effective = self._resolve_task_runtime(args, env_config)
         runtime_opts = await self._runtime_for_executor(effective, args)
         previous = self.executor.apply_runtime_options(runtime_opts)
-        logger.info(f"runtime options: {runtime_opts}")
+        logger.info("步骤执行环境已就绪")
         # 执行画面帧推流：无头开关关闭（观看模式）时经画布直播；批量执行不挂载
         self._exec_frame_case_id = 0
         self._exec_frame_page_step_id = page_step_id
@@ -780,7 +817,7 @@ class TaskConsumer:
                     'duration': time.time() - start_time,
                     'steps': [],
                 }
-                await self.ws_client.send_result(
+                await self._send_result(
                     'u_page_step_result',
                     summary_result,
                     self._current_user,
@@ -810,7 +847,7 @@ class TaskConsumer:
                             logger.warning(f"清理截图失败: {e}")
 
                 # 发送步骤结果
-                await self.ws_client.send_result(
+                await self._send_result(
                     UiSocketEnum.STEP_RESULT,
                     result.model_dump(),
                     self._current_user
@@ -832,7 +869,7 @@ class TaskConsumer:
             if isinstance(effective, dict) and effective.get('actuator_id'):
                 summary_result['actuator_id'] = effective.get('actuator_id')
 
-            await self.ws_client.send_result(
+            await self._send_result(
                 'u_page_step_result',  # 新增的结果类型
                 summary_result,
                 self._current_user
@@ -885,7 +922,7 @@ class TaskConsumer:
         effective_env, case_env_error = await self._resolve_case_env(case_data, env_config, env_config_id)
         if case_env_error:
             logger.error(f"用例 {case_data.get('id')} 环境校验失败: {case_env_error}")
-            await self.ws_client.send_result(
+            await self._send_result(
                 UiSocketEnum.CASE_RESULT,
                 {
                     'case_id': case_data.get('id'),
@@ -928,7 +965,7 @@ class TaskConsumer:
                 await self._materialize_test_case_uploads(config, project_id)
             except Exception as e:
                 logger.error(f'准备上传文件失败: {e}', exc_info=True)
-                await self.ws_client.send_result(
+                await self._send_result(
                     UiSocketEnum.CASE_RESULT,
                     {
                         'case_id': case_id,
@@ -948,7 +985,7 @@ class TaskConsumer:
 
             # 上传 Trace 文件并替换路径
             if result.trace_path:
-                server_trace_path = await self._upload_trace_file(result.trace_path)
+                server_trace_path = await self._upload_trace_file(result.trace_path, result.case_id)
                 if server_trace_path:
                     result.trace_path = server_trace_path
                 else:
@@ -969,7 +1006,7 @@ class TaskConsumer:
             if executor_name:
                 result_data['executor_name'] = executor_name
 
-            await self.ws_client.send_result(
+            await self._send_result(
                 UiSocketEnum.CASE_RESULT,
                 result_data,
                 self._current_user
@@ -1026,7 +1063,7 @@ class TaskConsumer:
             effective_env, case_env_error = await self._resolve_case_env(case_data, env_config, env_config_id)
             if case_env_error:
                 logger.error(f"批量用例 {case_id} 环境校验失败: {case_env_error}")
-                await self.ws_client.send_result(
+                await self._send_result(
                     UiSocketEnum.CASE_RESULT,
                     {
                         'case_id': case_id,
@@ -1044,11 +1081,14 @@ class TaskConsumer:
 
             # 构建配置
             config = self._build_test_case_config(case_data, env_config, data_processor)
+            effective_env_id = env_config.get('id') if env_config else None
+            for page_step in config.page_steps:
+                page_step.auth = await self._resolve_auth(effective_env_id, page_step.auth_state_id)
             try:
                 await self._materialize_test_case_uploads(config, project_id)
             except Exception as e:
                 logger.error(f'batch prepare upload failed case_id={case_id}: {e}', exc_info=True)
-                await self.ws_client.send_result(
+                await self._send_result(
                     UiSocketEnum.CASE_RESULT,
                     {
                         'case_id': case_id,
@@ -1076,7 +1116,7 @@ class TaskConsumer:
 
                 # 上传 Trace
                 if result.trace_path:
-                    server_trace_path = await self._upload_trace_file(result.trace_path)
+                    server_trace_path = await self._upload_trace_file(result.trace_path, result.case_id)
                     result.trace_path = server_trace_path if server_trace_path else None
 
                 # 发送结果
@@ -1092,7 +1132,7 @@ class TaskConsumer:
                     result_data['executor_id'] = executor_id
                 if executor_name:
                     result_data['executor_name'] = executor_name
-                await self.ws_client.send_result(
+                await self._send_result(
                     UiSocketEnum.CASE_RESULT,
                     result_data,
                     self._current_user
@@ -1105,12 +1145,12 @@ class TaskConsumer:
         effective = self._resolve_task_runtime(args, configs[0].env_config if configs else None)
         runtime_opts = await self._runtime_for_executor(effective, args)
         previous = self.executor.apply_runtime_options(runtime_opts)
-        logger.info(f"batch runtime options: {runtime_opts}")
+        logger.info("批量执行环境已就绪")
         try:
             await self.executor.execute_batch_concurrent(
                 configs,
                 max_concurrent=max_concurrent,
-                on_result=on_result
+                on_result=on_result, cancelled=self._run_stops.get(self._task_token, set())
             )
             logger.info("批量执行完成")
         finally:
@@ -1125,23 +1165,34 @@ class TaskConsumer:
         - 不带 task_id：全局硬停（stop_now 置实例级标志并清空任务队列），
           前端"停止执行"按钮的全局停止语义保持不变。
         """
-        case_id = None
-        if isinstance(args, dict):
-            case_id = args.get('task_id') or args.get('case_id')
-        if case_id:
-            logger.info(f"收到单用例停止请求: case_id={case_id}")
-            self.executor.stop_case(str(case_id))
+        target = args.get('task_id') or args.get('case_id')
+        if target:
+            token = args.get('run_token')
+            if token not in self._run_stops:
+                return
+            self._run_stops[token].add(target)
+            if token == self._task_token and target in self._outstanding:
+                if self._active_kind == UiSocketEnum.TEST_CASE_BATCH:
+                    self.executor.stop_batch_case(target)
+                elif self._active_handler:
+                    self._active_handler.cancel()
             return
         logger.info("收到停止执行请求，立即中断执行")
         await self.executor.stop_now()
-        # 清空任务队列
+        if self._active_handler:
+            self._run_stops.get(self._task_token, set()).update(self._outstanding)
+            self._active_handler.cancel()
+        # Queued runs still report their own cancellation with their original identity.
+        pending = []
         while not self.task_queue.empty():
-            try:
-                self.task_queue.get_nowait()
-                self.task_queue.task_done()
-            except asyncio.QueueEmpty:
-                break
-    
+            task, user = self.task_queue.get_nowait()
+            self.task_queue.task_done()
+            args = task.func_args
+            self._run_stops.get(args.get('task_token'), set()).update(
+                args.get('case_ids') or [args.get('case_id') or args.get('page_step_id')])
+            pending.append((task, user))
+        for item in pending:
+            self.task_queue.put_nowait(item)
 
     def _upload_cache_dir(self) -> Path:
         raw = getattr(self.config, 'upload_cache_dir', './data/runtime_uploads') if self.config else './data/runtime_uploads'

@@ -185,90 +185,26 @@ class ResultSourceVerificationTests(TestCase):
         consumer.user_id = 'act-test'
         return consumer
 
-    def test_registered_user_passes(self):
-        consumer = self._actuator_consumer()
-        consumer.actuator_recent_users['web_1'] = 1.0
-        self.assertTrue(consumer.verify_result_source('web_1'))
-
-    def test_unregistered_user_rejected_in_strict_mode(self):
-        consumer = self._actuator_consumer()
-        self.assertFalse(consumer.verify_result_source('web_victim'))
-
-    def test_unregistered_user_rejected_without_strict_override(self):
-        """严格模式恒开：未登记来源一律拒绝（无需 override）。"""
-        consumer = self._actuator_consumer()
-        self.assertFalse(consumer.verify_result_source('web_anyone'))
-
-    def test_empty_user_rejected_in_strict_mode(self):
-        consumer = self._actuator_consumer()
-        self.assertFalse(consumer.verify_result_source(''))
-
-    def test_web_connection_always_passes(self):
-        consumer = cons.UiAutomationConsumer()
-        consumer.is_actuator = False
-        self.assertTrue(consumer.verify_result_source('nobody'))
-
-    def test_register_task_records_user_and_token(self):
-        consumer = self._actuator_consumer()
-        args: dict = {}
-        consumer.register_actuator_task(consumer, args, 'web_9')
-        self.assertTrue(args.get('task_token'))
-        self.assertIn('web_9', consumer.actuator_recent_users)
-        # 登记 token 后可被校验通过
-        self.assertIn(args['task_token'], consumer.actuator_task_tokens)
-
-    def test_recent_users_cleanup_prunes_expired(self):
-        consumer = self._actuator_consumer()
-        consumer.actuator_recent_users['web_old'] = -10_000.0
-        consumer.register_actuator_task(consumer, {}, 'web_new')
-        self.assertNotIn('web_old', consumer.actuator_recent_users)
-        self.assertIn('web_new', consumer.actuator_recent_users)
-
-    def test_task_tokens_pruned_on_register(self):
-        """过期 token 登记在下次登记时被统一清理（#8：防长连接内存增长）。"""
-        consumer = self._actuator_consumer()
-        stale_time = -10_000.0
-        consumer.actuator_task_tokens['stale-token'] = ('web_old', stale_time)
-        consumer.register_actuator_task(consumer, {}, 'web_new')
-        self.assertNotIn('stale-token', consumer.actuator_task_tokens)
-
-    def test_token_echo_strong_verification(self):
-        """执行器回显 task_token：一一对应强校验；登记非消费式，同一任务的
-        多条结果（逐步结果/帧/汇总）复用同一 token 均可校验通过。"""
-        consumer = self._actuator_consumer()
-        args: dict = {}
-        consumer.register_actuator_task(consumer, args, 'web_9')
+    def test_registered_task_requires_its_token_and_original_user(self):
+        actuator = self._actuator_consumer()
+        args = {'case_id': 1, 'executor_id': 5}
+        actuator.register_actuator_task(actuator, args, 'web_9')
         token = args['task_token']
-        first_args = {'task_token': token, 'case_id': 1}
-        self.assertTrue(consumer.verify_result_source('web_9', first_args))
-        # token 已从 args 剥离（不随结果入库/广播）
-        self.assertNotIn('task_token', first_args)
-        # 非消费式：再次回显同一 token 仍命中
-        self.assertTrue(
-            consumer.verify_result_source('web_9', {'task_token': token})
-        )
+        for user, supplied in [('web_9', 'forged'), ('web_victim', token), ('web_9', None)]:
+            self.assertEqual(actuator._take_result_source(user, {'task_token': supplied}), (None, None))
+        for _ in range(2):
+            payload = {'task_token': token}
+            _, run = actuator._take_result_source('web_9', payload)
+            self.assertEqual((run['owner'], run['cases']), (5, {1}))
+            self.assertNotIn('task_token', payload)
 
-    def test_token_user_mismatch_rejected(self):
-        """task_token 与 claimed_user 不符（伪造/串扰）→ 拒绝。"""
-        consumer = self._actuator_consumer()
-        args: dict = {}
-        consumer.register_actuator_task(consumer, args, 'web_9')
-        mismatch_args = {'task_token': args['task_token']}
-        self.assertFalse(
-            consumer.verify_result_source('web_victim', mismatch_args)
-        )
-        # 拒绝路径同样剥离 token
-        self.assertNotIn('task_token', mismatch_args)
-
-    def test_unknown_token_falls_back_to_user_record(self):
-        """未知 token（伪造/过期）→ 回退按 user 近期记录校验。"""
-        consumer = self._actuator_consumer()
-        consumer.register_actuator_task(consumer, {}, 'web_9')
-        # 已登记用户 + 伪造 token：user 命中放行
-        self.assertTrue(
-            consumer.verify_result_source('web_9', {'task_token': 'forged'})
-        )
-        # 未登记用户 + 伪造 token：拒绝
-        self.assertFalse(
-            consumer.verify_result_source('web_victim', {'task_token': 'forged'})
-        )
+    def test_expired_task_cannot_report_or_stop(self):
+        actuator = self._actuator_consumer()
+        with patch('ui_automation.consumers.time.monotonic', return_value=100):
+            args = {'case_id': 1}
+            actuator.register_actuator_task(actuator, args, 'web_9')
+        token = args['task_token']
+        with patch('ui_automation.consumers.time.monotonic', return_value=101 + actuator._TASK_TOKEN_TTL_SECONDS):
+            self.assertEqual(actuator._take_result_source('web_9', {'task_token': token}), (None, None))
+            actuator.register_actuator_task(actuator, {}, 'web_9')
+            self.assertNotIn(token, actuator.actuator_runs)

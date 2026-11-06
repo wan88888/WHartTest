@@ -3,6 +3,8 @@ import logging
 """UI 自动化序列化器"""
 
 from rest_framework import serializers
+from .access import validate_project_relations
+from .auth_state import credential_summary
 
 logger = logging.getLogger(__name__)
 from file_management.services import validate_file_ids, sync_file_references, serialize_file_for_runtime
@@ -63,7 +65,7 @@ def _resolve_captcha_ope_value(obj):
     if not target_id:
         return value
     try:
-        target_el = UiElement.objects.filter(pk=target_id).first()
+        target_el = UiElement.objects.filter(pk=target_id, page__project_id=obj.page_step.project_id).first()
         if target_el:
             value['target_locator'] = {
                 'element_id': target_el.id,
@@ -86,7 +88,13 @@ def _resolve_captcha_ope_value(obj):
     return value
 
 
-class UiModuleSerializer(serializers.ModelSerializer):
+class ProjectResourceSerializer(serializers.ModelSerializer):
+    def run_validation(self, data=serializers.empty):
+        attrs = super().run_validation(data)
+        return validate_project_relations(self, attrs)
+
+
+class UiModuleSerializer(ProjectResourceSerializer):
     """模块序列化器"""
     children = serializers.SerializerMethodField()
     creator_name = serializers.CharField(source='creator.username', read_only=True)
@@ -97,11 +105,11 @@ class UiModuleSerializer(serializers.ModelSerializer):
         read_only_fields = ['level', 'creator', 'created_at', 'updated_at', 'order']
 
     def get_children(self, obj):
-        children = obj.children.all()
+        children = obj.children.filter(project_id=obj.project_id)
         return UiModuleSerializer(children, many=True).data if children else []
 
 
-class UiElementSerializer(serializers.ModelSerializer):
+class UiElementSerializer(ProjectResourceSerializer):
     """元素序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
 
@@ -111,7 +119,7 @@ class UiElementSerializer(serializers.ModelSerializer):
         read_only_fields = ['creator', 'created_at', 'updated_at']
 
 
-class UiPageSerializer(serializers.ModelSerializer):
+class UiPageSerializer(ProjectResourceSerializer):
     """页面序列化器"""
     module_name = serializers.CharField(source='module.name', read_only=True)
     creator_name = serializers.CharField(source='creator.username', read_only=True)
@@ -134,7 +142,7 @@ class UiPageDetailSerializer(UiPageSerializer):
         fields = '__all__'
 
 
-class UiPageStepsDetailedSerializer(serializers.ModelSerializer):
+class UiPageStepsDetailedSerializer(ProjectResourceSerializer):
     """步骤详情序列化器"""
     element_name = serializers.CharField(source='element.name', read_only=True)
     page_name = serializers.SerializerMethodField()
@@ -169,6 +177,8 @@ class UiPageStepsDetailedSerializer(serializers.ModelSerializer):
             target_id = (ope_value or {}).get('target_element_id') or (ope_value or {}).get('target_element')
             if not target_id:
                 raise serializers.ValidationError({'ope_value': '智能识别验证码操作必须选择目标输入框元素。'})
+            if page_step and not UiElement.objects.filter(pk=target_id, page__project_id=page_step.project_id).exists():
+                raise serializers.ValidationError({'ope_value': '验证码目标元素必须属于当前项目'})
         return attrs
 
 
@@ -230,7 +240,7 @@ class UiPageStepsListSerializer(serializers.ModelSerializer):
         return obj.step_details.count()
 
 
-class UiPageStepsSerializer(serializers.ModelSerializer):
+class UiPageStepsSerializer(ProjectResourceSerializer):
     """页面步骤序列化器"""
     page_name = serializers.CharField(source='page.name', read_only=True)
     module_name = serializers.CharField(source='module.name', read_only=True)
@@ -282,7 +292,7 @@ class UiPageStepsExecuteSerializer(UiPageStepsSerializer):
         fields = '__all__'
 
 
-class UiCaseStepsDetailedSerializer(serializers.ModelSerializer):
+class UiCaseStepsDetailedSerializer(ProjectResourceSerializer):
     """用例步骤序列化器"""
     page_step_name = serializers.CharField(source='page_step.name', read_only=True)
     page_name = serializers.SerializerMethodField()
@@ -332,7 +342,7 @@ class UiTestCaseListSerializer(serializers.ModelSerializer):
         return obj.case_steps.count()
 
 
-class UiTestCaseSerializer(serializers.ModelSerializer):
+class UiTestCaseSerializer(ProjectResourceSerializer):
     """测试用例序列化器"""
     module_name = serializers.CharField(source='module.name', read_only=True)
     creator_name = serializers.CharField(source='creator.username', read_only=True)
@@ -352,7 +362,7 @@ class UiTestCaseSerializer(serializers.ModelSerializer):
         """绑定环境必须属于本用例所在项目。"""
         if value is not None:
             project_id = self.initial_data.get('project') or getattr(self.instance, 'project_id', None)
-            if project_id and value.project_id != project_id:
+            if project_id and str(value.project_id) != str(project_id):
                 raise serializers.ValidationError('执行环境必须属于用例所在项目')
         return value
 
@@ -421,7 +431,13 @@ class UiExecutionRecordListSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
 
-class UiExecutionRecordBatchDetailSerializer(serializers.ModelSerializer):
+class ExecutionReportSerializer(serializers.ModelSerializer):
+    def to_representation(self, instance):
+        from .artifacts import report_representation
+        return report_representation(instance, super().to_representation(instance))
+
+
+class UiExecutionRecordBatchDetailSerializer(ExecutionReportSerializer):
     """批量执行详情中的执行记录序列化器（包含步骤结果和错误信息，不含过大字段）"""
     test_case_name = serializers.CharField(source='test_case.name', read_only=True)
     executor_name = serializers.CharField(source='executor.username', read_only=True)
@@ -436,7 +452,7 @@ class UiExecutionRecordBatchDetailSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
 
-class UiExecutionRecordSerializer(serializers.ModelSerializer):
+class UiExecutionRecordSerializer(ExecutionReportSerializer):
     """执行记录序列化器"""
     test_case_name = serializers.CharField(source='test_case.name', read_only=True)
     executor_name = serializers.CharField(source='executor.username', read_only=True)
@@ -447,7 +463,7 @@ class UiExecutionRecordSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
 
-class UiPublicDataSerializer(serializers.ModelSerializer):
+class UiPublicDataSerializer(ProjectResourceSerializer):
     """公共数据序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
 
@@ -457,7 +473,7 @@ class UiPublicDataSerializer(serializers.ModelSerializer):
         read_only_fields = ['creator', 'created_at', 'updated_at']
 
 
-class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
+class UiEnvironmentConfigSerializer(ProjectResourceSerializer):
     """环境配置序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     auth_state_active = serializers.SerializerMethodField()
@@ -472,16 +488,29 @@ class UiEnvironmentConfigSerializer(serializers.ModelSerializer):
         return UiAuthState.objects.filter(env_config_id=obj.id, is_active=True).exists()
 
 
-class UiAuthStateSerializer(serializers.ModelSerializer):
+class UiAuthStateSerializer(ProjectResourceSerializer):
     """环境登录态序列化器（state_json 为执行器使用的 storageState 快照，
     可含扩展字段 session_storage：采集的 sessionStorage 快照）"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     env_name = serializers.CharField(source='env_config.name', read_only=True)
     project_id = serializers.IntegerField(source='env_config.project_id', read_only=True)
 
+    credential_summary = serializers.SerializerMethodField()
+
+    def validate_state_json(self, state):
+        credential_summary(state)
+        return state
+
+    def get_credential_summary(self, obj):
+        try:
+            return credential_summary(obj.state_json)
+        except serializers.ValidationError:
+            return {**credential_summary(None), 'invalid': True}
+
     class Meta:
         model = UiAuthState
         fields = '__all__'
+        extra_kwargs = {'state_json': {'write_only': True}}
         read_only_fields = ['creator', 'created_at', 'updated_at']
 
 

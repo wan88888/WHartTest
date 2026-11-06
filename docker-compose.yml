@@ -50,6 +50,25 @@ services:
     command: redis-server --appendonly yes
 
   # 后端 Django 服务（包含Celery Worker和Beat）
+  function-sandbox:
+    build:
+      context: ./WHartTest_Django/function_sandbox
+      args:
+        PYTHON_BASE_IMAGE: ${DOCKER_PYTHON_BASE_IMAGE:-python:3.11-slim}
+    network_mode: none
+    read_only: true
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 16
+    cpus: 1
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=2m
+    volumes:
+      - function-socket:/run/whart-functions
+    restart: unless-stopped
+
   backend:
     image: ${DOCKER_BACKEND_IMAGE:-ghcr.io/mgdaaslab/wharttest-backend:latest}
     # 如果需要本地构建，注释掉上面的image行，取消注释下面的build部分
@@ -62,6 +81,7 @@ services:
       - "8912:8000"
     volumes:
       - ./data:/app/data
+      - function-socket:/run/whart-functions:ro
       - backend-static:/app/static
       - ./WHartTest_Skills:/app/bundled_skills:ro
     environment:
@@ -111,6 +131,8 @@ services:
       # 沙箱内 Skill 访问 backend 的地址（沙箱里的 127.0.0.1 是它自己）
       - WHARTTEST_RUNNER_BACKEND_URL=${WHARTTEST_RUNNER_BACKEND_URL:-http://backend:8000}
     depends_on:
+      function-sandbox:
+        condition: service_started
       postgres:
         condition: service_healthy
       redis:
@@ -348,6 +370,7 @@ networks:
     driver: bridge
 
 volumes:
+  function-socket:
   backend-static:
   redis-data:
   celery-beat-schedule:

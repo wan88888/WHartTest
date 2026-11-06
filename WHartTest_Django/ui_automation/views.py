@@ -22,10 +22,16 @@ from django.db import transaction
 from copy import deepcopy
 from file_management.services import maybe_cleanup_unreferenced_files, sync_file_references
 
+from django.shortcuts import get_object_or_404
+from rest_framework.exceptions import ValidationError, PermissionDenied
+from wharttest_django.permissions import HasModelPermission, permission_required
+from .artifacts import artifact_path, artifact_url, serve_artifact, store_artifact, validate_trace
+from .auth_state import credential_summary
+from .access import EXECUTE, MANAGE_ACTUATORS, RECORD_PERMS, execution_context, project_queryset, require_project
 from .models import (
     UiModule, UiPage, UiElement, UiPageSteps, UiPageStepsDetailed,
     UiTestCase, UiCaseStepsDetailed, UiExecutionRecord, UiPublicData, UiEnvironmentConfig,
-    UiBatchExecutionRecord, UiAuthState
+    UiBatchExecutionRecord, UiAuthState, UiExecutionArtifact
 )
 from file_management.models import FileReference
 from .serializers import (
@@ -93,7 +99,29 @@ def _remove_upload_step_file_reference(step, user=None):
     return old_file_ids
 
 
-class UiModuleViewSet(viewsets.ModelViewSet):
+def _check_step_replacement(user, rows, steps):
+    if not isinstance(steps, list) or not all(isinstance(step, dict) for step in steps):
+        raise ValidationError('步骤格式无效')
+    ids = [step['id'] for step in steps if step.get('id') is not None]
+    current = set(rows.values_list('id', flat=True))
+    if any(type(pk) is not int for pk in ids) or len(set(ids)) != len(ids) or not set(ids) <= current:
+        raise ValidationError('步骤列表已变化，请刷新后重试')
+    name = rows.model._meta.model_name
+    if len(ids) < len(steps) and not user.has_perm('ui_automation.add_' + name):
+        raise PermissionDenied('缺少新增步骤的权限')
+    if current - set(ids) and not user.has_perm('ui_automation.delete_' + name):
+        raise PermissionDenied('缺少删除步骤的权限')
+    return ids
+
+
+class ProjectResourceViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated, HasModelPermission]
+
+    def get_queryset(self):
+        return project_queryset(super().get_queryset(), self.request.user)
+
+
+class UiModuleViewSet(ProjectResourceViewSet):
     """模块管理视图"""
     queryset = UiModule.objects.select_related('project', 'parent', 'creator')
     serializer_class = UiModuleSerializer
@@ -123,11 +151,12 @@ class UiModuleViewSet(viewsets.ModelViewSet):
         project_id = request.query_params.get('project')
         if not project_id:
             return Response({'error': 'project 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
-        modules = UiModule.objects.filter(project_id=project_id, parent__isnull=True)
+        modules = self.get_queryset().filter(project_id=project_id, parent__isnull=True)
         serializer = self.get_serializer(modules, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
+    @permission_required('ui_automation.change_uimodule')
     def move(self, request, pk=None):
         """
         移动模块：支持移动到另一个模块的之前、之后或作为其子模块。
@@ -274,7 +303,7 @@ class UiModuleViewSet(viewsets.ModelViewSet):
             return Response(serializer.data)
 
 
-class UiPageViewSet(viewsets.ModelViewSet):
+class UiPageViewSet(ProjectResourceViewSet):
     """页面管理视图"""
     queryset = UiPage.objects.select_related('project', 'module', 'creator')
     serializer_class = UiPageSerializer
@@ -369,7 +398,7 @@ class UiPageViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class UiElementViewSet(viewsets.ModelViewSet):
+class UiElementViewSet(ProjectResourceViewSet):
     """元素管理视图"""
     queryset = UiElement.objects.select_related('page', 'creator')
     serializer_class = UiElementSerializer
@@ -393,13 +422,14 @@ class UiElementViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=False, methods=['post'], url_path='batch-delete')
+    @permission_required('ui_automation.delete_uielement')
     def batch_delete(self, request):
         """批量删除元素。POST: {"ids": [1, 2]}；被页面步骤引用的元素拒绝删除。"""
         ids = request.data.get('ids') or []
         if not ids:
             return Response({'error': 'ids 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
-            elements = list(UiElement.objects.filter(id__in=ids).annotate(
+            elements = list(self.get_queryset().filter(id__in=ids).annotate(
                 usage=Count('step_details'),
             ))
             if not elements:
@@ -416,7 +446,7 @@ class UiElementViewSet(viewsets.ModelViewSet):
         return Response({'deleted': len(deleted_ids), 'blocked': []})
 
 
-class UiPageStepsViewSet(viewsets.ModelViewSet):
+class UiPageStepsViewSet(ProjectResourceViewSet):
     """页面步骤管理视图"""
     queryset = UiPageSteps.objects.select_related('project', 'page', 'module', 'creator')
     serializer_class = UiPageStepsSerializer
@@ -532,7 +562,7 @@ class UiPageStepsViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
+class UiPageStepsDetailedViewSet(ProjectResourceViewSet):
     """步骤详情管理视图"""
     queryset = UiPageStepsDetailed.objects.select_related('page_step', 'page_step__project', 'element')
     serializer_class = UiPageStepsDetailedSerializer
@@ -557,6 +587,7 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
             maybe_cleanup_unreferenced_files(project, candidate_file_ids=old_file_ids, reason='unbind')
 
     @action(detail=False, methods=['post'], url_path='batch-delete')
+    @permission_required('ui_automation.delete_uipagestepsdetailed')
     def batch_delete(self, request):
         """批量删除步骤明细。POST: {"ids": [1, 2]}；同步清理附件引用。"""
         ids = request.data.get('ids') or []
@@ -576,6 +607,7 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
         return Response({'deleted': deleted_count})
 
     @action(detail=False, methods=['post'])
+    @permission_required('ui_automation.change_uipagestepsdetailed')
     def batch_update(self, request):
         """批量更新步骤详情"""
         page_step_id = request.data.get('page_step')
@@ -583,8 +615,9 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
         if not page_step_id:
             return Response({'error': 'page_step 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            get_object_or_404(project_queryset(UiPageSteps.objects.select_for_update(), request.user), pk=page_step_id)
             qs = self.get_queryset().select_related('page_step', 'page_step__project').filter(page_step_id=page_step_id)
-            submitted_ids = [s.get('id') for s in steps if s.get('id')]
+            submitted_ids = _check_step_replacement(request.user, qs, steps)
             old_file_ids = []
             project = None
 
@@ -626,7 +659,7 @@ class UiPageStepsDetailedViewSet(viewsets.ModelViewSet):
         return Response({'message': '批量更新成功'})
 
 
-class UiTestCaseViewSet(viewsets.ModelViewSet):
+class UiTestCaseViewSet(ProjectResourceViewSet):
     """测试用例管理视图"""
     queryset = UiTestCase.objects.select_related('project', 'module', 'creator')
     serializer_class = UiTestCaseSerializer
@@ -728,6 +761,7 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='batch-delete')
+    @permission_required('ui_automation.delete_uitestcase')
     def batch_delete(self, request, **kwargs):
         """
         批量删除UI自动化测试用例
@@ -805,7 +839,7 @@ class UiTestCaseViewSet(viewsets.ModelViewSet):
             )
 
 
-class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
+class UiCaseStepsDetailedViewSet(ProjectResourceViewSet):
     """用例步骤管理视图"""
     queryset = UiCaseStepsDetailed.objects.select_related('test_case', 'page_step')
     serializer_class = UiCaseStepsDetailedSerializer
@@ -815,6 +849,23 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
     ordering = ['test_case', 'case_sort']
 
     @action(detail=False, methods=['post'])
+    @permission_required('ui_automation.change_uicasestepsdetailed')
+    @transaction.atomic
+    def reorder(self, request):
+        case = get_object_or_404(project_queryset(UiTestCase.objects.select_for_update(), request.user),
+                                 pk=request.data.get('test_case'))
+        ids = request.data.get('ids')
+        rows = {step.pk: step for step in self.get_queryset().select_for_update(of=('self',)).filter(test_case=case)}
+        if (not isinstance(ids, list) or any(type(pk) is not int for pk in ids)
+                or len(ids) != len(rows) or set(ids) != rows.keys()):
+            raise ValidationError('步骤列表已经变化，请刷新后重试')
+        for index, pk in enumerate(ids):
+            rows[pk].case_sort = index
+        UiCaseStepsDetailed.objects.bulk_update(rows.values(), ['case_sort'])
+        return Response({'message': '排序已保存'})
+
+    @action(detail=False, methods=['post'])
+    @permission_required('ui_automation.change_uicasestepsdetailed')
     def batch_update(self, request):
         """批量更新用例步骤"""
         test_case_id = request.data.get('test_case')
@@ -822,8 +873,9 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
         if not test_case_id:
             return Response({'error': 'test_case 参数必填'}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
+            get_object_or_404(project_queryset(UiTestCase.objects.select_for_update(), request.user), pk=test_case_id)
             qs = self.get_queryset().filter(test_case_id=test_case_id)
-            submitted_ids = [s.get('id') for s in steps if s.get('id')]
+            submitted_ids = _check_step_replacement(request.user, qs, steps)
             # 仅删除被移除的步骤，对已提交的进行原地更新，
             # 避免重建丢失 case_data 等未提交字段（数据填充被清空）
             if submitted_ids:
@@ -844,8 +896,9 @@ class UiCaseStepsDetailedViewSet(viewsets.ModelViewSet):
         return Response({'message': '批量更新成功'})
 
 
-class UiExecutionRecordViewSet(viewsets.ModelViewSet):
+class UiExecutionRecordViewSet(ProjectResourceViewSet):
     """执行记录管理视图"""
+    http_method_names = ['get', 'head', 'options', 'delete']
     queryset = UiExecutionRecord.objects.select_related('test_case', 'executor')
     serializer_class = UiExecutionRecordSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -871,34 +924,6 @@ class UiExecutionRecordViewSet(viewsets.ModelViewSet):
             return UiExecutionRecordListSerializer
         return UiExecutionRecordSerializer
 
-    def perform_create(self, serializer):
-        serializer.save(executor=self.request.user)
-
-    def perform_destroy(self, instance):
-        """删除执行记录及其关联文件"""
-        import os
-        from django.conf import settings
-
-        def safe_delete(path):
-            if not path:
-                return
-            full_path = path if os.path.isabs(path) else os.path.join(settings.MEDIA_ROOT, path.lstrip('/'))
-            if os.path.exists(full_path):
-                os.remove(full_path)
-
-        # 删除截图
-        for screenshot in instance.screenshots or []:
-            if isinstance(screenshot, str):
-                safe_delete(screenshot.replace(settings.MEDIA_URL, ''))
-
-        # 删除视频
-        safe_delete(instance.video_path)
-
-        # 删除 Trace 文件
-        safe_delete(instance.trace_path)
-
-        instance.delete()
-    
     @action(detail=True, methods=['get'], url_path='trace')
     def get_trace_data(self, request, pk=None):
         """获取执行记录的 Trace 数据
@@ -917,21 +942,19 @@ class UiExecutionRecordViewSet(viewsets.ModelViewSet):
             })
         
         # 尝试解析 trace 文件
-        if not instance.trace_path:
+        artifact = instance.artifacts.filter(kind='trace').first()
+        if not artifact:
             return Response({
                 'status': 'error',
                 'message': '此执行记录没有 Trace 数据'
             }, status=status.HTTP_404_NOT_FOUND)
         
         from .trace_parser import parse_trace_file
-        import os
-        from django.conf import settings
-        
-        # 构建完整路径
-        trace_path = instance.trace_path
-        if not os.path.isabs(trace_path):
-            trace_path = os.path.join(settings.MEDIA_ROOT, trace_path)
-        
+        trace_path = artifact_path(artifact.path, 'trace')
+        if not trace_path.is_file():
+            return Response({'message': 'Trace 文件不存在'}, status=404)
+        if artifact.path.startswith('ui_traces/'):
+            validate_trace(trace_path)
         trace_data = parse_trace_file(trace_path)
         if not trace_data:
             return Response({
@@ -949,7 +972,7 @@ class UiExecutionRecordViewSet(viewsets.ModelViewSet):
         })
 
 
-class UiPublicDataViewSet(viewsets.ModelViewSet):
+class UiPublicDataViewSet(ProjectResourceViewSet):
     """公共数据管理视图"""
     queryset = UiPublicData.objects.select_related('project', 'creator')
     serializer_class = UiPublicDataSerializer
@@ -969,7 +992,7 @@ class UiPublicDataViewSet(viewsets.ModelViewSet):
         返回格式（经 UnifiedResponseRenderer 包装后）:
         {"status": "success", "code": 200, "data": [{"key": "username", "value": "admin", "type": 0}, ...]}
         """
-        public_data = UiPublicData.objects.filter(
+        public_data = self.get_queryset().filter(
             project_id=project_id,
             is_enabled=True
         ).values('key', 'value', 'type')
@@ -977,7 +1000,7 @@ class UiPublicDataViewSet(viewsets.ModelViewSet):
         return Response(list(public_data))
 
 
-class UiEnvironmentConfigViewSet(viewsets.ModelViewSet):
+class UiEnvironmentConfigViewSet(ProjectResourceViewSet):
     """环境配置管理视图"""
     queryset = UiEnvironmentConfig.objects.select_related('project', 'creator')
     serializer_class = UiEnvironmentConfigSerializer
@@ -991,7 +1014,7 @@ class UiEnvironmentConfigViewSet(viewsets.ModelViewSet):
         serializer.save(creator=self.request.user)
 
 
-class UiAuthStateViewSet(viewsets.ModelViewSet):
+class UiAuthStateViewSet(ProjectResourceViewSet):
     """环境登录态管理视图（登录态绑定环境配置，执行时按环境自动注入）"""
     queryset = UiAuthState.objects.select_related('env_config', 'creator')
     serializer_class = UiAuthStateSerializer
@@ -1018,13 +1041,12 @@ _ACTUATOR_CONFIG_FIELDS = frozenset({
 
 class ActuatorViewSet(viewsets.ViewSet):
     """执行器管理视图"""
-    permission_classes = []  # 公开访问，不需要特殊权限
+    permission_classes = [IsAuthenticated]
 
     def get_permissions(self):
-        """config 为写操作，需要登录；其余保持公开"""
         if self.action == 'config':
-            return [IsAuthenticated()]
-        return []
+            return [IsAuthenticated(), HasModelPermission(MANAGE_ACTUATORS)]
+        return super().get_permissions()
 
     @action(detail=False, methods=['get'])
     def list_actuators(self, request):
@@ -1216,8 +1238,9 @@ class ActuatorViewSet(viewsets.ViewSet):
         })
 
 
-class UiBatchExecutionRecordViewSet(viewsets.ModelViewSet):
+class UiBatchExecutionRecordViewSet(ProjectResourceViewSet):
     """批量执行记录管理视图"""
+    http_method_names = ['get', 'head', 'options', 'delete']
     queryset = UiBatchExecutionRecord.objects.select_related('executor')
     serializer_class = UiBatchExecutionRecordSerializer
     filter_backends = [DjangoFilterBackend, OrderingFilter]
@@ -1230,20 +1253,21 @@ class UiBatchExecutionRecordViewSet(viewsets.ModelViewSet):
         queryset = super().get_queryset()
         project_id = self.request.query_params.get('project')
         if project_id:
-            queryset = queryset.filter(execution_records__test_case__project_id=project_id).distinct()
+            queryset = queryset.filter(project_id=project_id)
         # 详情时预加载执行记录
-        if self.action == 'retrieve':
-            queryset = queryset.prefetch_related('execution_records', 'execution_records__test_case')
+        if self.action == 'retrieve' and self.request.user.has_perm('ui_automation.view_uiexecutionrecord'):
+            queryset = queryset.prefetch_related('execution_records__artifacts', 'execution_records__test_case')
         return queryset
 
     def get_serializer_class(self):
-        if self.action == 'retrieve':
+        if self.action == 'retrieve' and self.request.user.has_perm('ui_automation.view_uiexecutionrecord'):
             return UiBatchExecutionRecordDetailSerializer
         return UiBatchExecutionRecordSerializer
 
     def perform_destroy(self, instance):
         """删除批量执行记录及其关联的执行记录"""
-        instance.execution_records.all().delete()
+        if not self.request.user.has_perm('ui_automation.delete_uiexecutionrecord'):
+            raise PermissionDenied('删除批量记录及其用例报告需要执行记录删除权限')
         instance.delete()
 
 
@@ -1264,68 +1288,39 @@ from rest_framework.permissions import AllowAny
 @parser_classes([MultiPartParser])
 @permission_classes([IsAuthenticated])
 def upload_screenshot(request):
-    """上传执行截图，返回可访问 URL
-    
-    注意：此接口使用 Bearer Token 认证
-    执行器通过 /api/token/ 获取 JWT Token 后调用此接口
-    """
-    file = request.FILES.get('file')
-    if not file:
-        return Response({'error': '未提供文件'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # 保存到 media/ui_screenshots/{日期}/
-    date_dir = datetime.now().strftime('%Y%m%d')
-    upload_dir = os.path.join(settings.MEDIA_ROOT, 'ui_screenshots', date_dir)
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # 生成唯一文件名
-    ext = os.path.splitext(file.name)[1] or '.png'
-    filename = f"{uuid.uuid4().hex[:12]}{ext}"
-    file_path = os.path.join(upload_dir, filename)
-    
-    with open(file_path, 'wb') as f:
-        for chunk in file.chunks():
-            f.write(chunk)
-    
-    url = f"{settings.MEDIA_URL}ui_screenshots/{date_dir}/{filename}"
-    return Response({'status': 'success', 'url': url}, status=status.HTTP_201_CREATED)
+    return _upload_artifact(request, 'screenshot')
 
 
 @api_view(['POST'])
 @parser_classes([MultiPartParser])
 @permission_classes([IsAuthenticated])
 def upload_trace(request):
-    """上传 Playwright Trace 文件，返回可访问 URL
-    
-    注意：此接口使用 Bearer Token 认证
-    执行器执行完成后调用此接口上传 trace.zip 文件
-    """
+    return _upload_artifact(request, 'trace')
+
+
+def _upload_artifact(request, kind):
+    if not request.user.has_perm(EXECUTE):
+        raise PermissionDenied('缺少 UI 自动化执行权限')
+    try:
+        case_id = int(request.data.get('test_case'))
+    except (TypeError, ValueError):
+        raise ValidationError({'test_case': '请选择产物所属用例'}) from None
+    case = get_object_or_404(project_queryset(UiTestCase.objects.all(), request.user), pk=case_id)
     file = request.FILES.get('file')
     if not file:
-        return Response({'error': '未提供文件'}, status=status.HTTP_400_BAD_REQUEST)
-    
-    # 保存到 media/ui_traces/{日期}/
-    date_dir = datetime.now().strftime('%Y%m%d')
-    upload_dir = os.path.join(settings.MEDIA_ROOT, 'ui_traces', date_dir)
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # 生成唯一文件名
-    ext = os.path.splitext(file.name)[1] or '.zip'
-    filename = f"{uuid.uuid4().hex[:12]}{ext}"
-    file_path = os.path.join(upload_dir, filename)
-    
-    with open(file_path, 'wb') as f:
-        for chunk in file.chunks():
-            f.write(chunk)
-    
-    # 返回相对路径（用于存储到数据库）和 URL（用于下载）
-    relative_path = f"ui_traces/{date_dir}/{filename}"
-    url = f"{settings.MEDIA_URL}{relative_path}"
-    return Response({
-        'status': 'success',
-        'url': url,
-        'path': relative_path
-    }, status=status.HTTP_201_CREATED)
+        raise ValidationError({'file': '请选择文件'})
+    artifact = store_artifact(file, kind, case.pk)
+    return Response({'status': 'success', 'url': artifact_url(artifact), 'path': artifact.path}, status=201)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def download_artifact(request, pk):
+    if not request.user.has_perm('ui_automation.view_uiexecutionrecord'):
+        raise PermissionDenied('缺少查看 UI 执行记录的权限')
+    cases = project_queryset(UiTestCase.objects.all(), request.user)
+    artifact = get_object_or_404(UiExecutionArtifact, pk=pk, test_case__in=cases)
+    return serve_artifact(artifact)
 
 
 # ---------- 内部触发批量执行（供 Celery 任务调用） ----------
@@ -1379,7 +1374,7 @@ def trigger_batch_execution(request):
     case_ids = request.data.get('case_ids', [])
     actuator_id = request.data.get('actuator_id', '')
     batch_name = request.data.get('batch_name', '')
-    trigger_type = request.data.get('trigger_type', 'scheduled')
+    trigger_type = request.data.get('trigger_type', 'api')
     scheduled_task_id = request.data.get('scheduled_task_id')
     task_execution_id = request.data.get('task_execution_id')
 
@@ -1391,6 +1386,16 @@ def trigger_batch_execution(request):
 
     env_config_id = request.data.get('env_config_id')
     run_options = request.data.get('run_options') or {}
+
+    project_id, snapshots = execution_context(request.user, case_ids=case_ids, env_id=env_config_id)
+    if scheduled_task_id or task_execution_id or trigger_type == 'scheduled':
+        from django.core import signing
+        try:
+            grant = signing.loads(request.data.get('schedule_grant') or '', salt='ui.schedule', max_age=120)
+        except signing.BadSignature:
+            raise PermissionDenied('计划任务凭据无效') from None
+        if grant != [request.user.pk, scheduled_task_id, task_execution_id, case_ids]:
+            raise PermissionDenied('计划任务与执行目标不匹配')
 
     env = None
     if env_config_id:
@@ -1420,11 +1425,12 @@ def trigger_batch_execution(request):
         timeout_ms = 0
     if timeout_ms > 0:
         ttl = max(15 * 60, min(int(timeout_ms / 1000) * 3 * max(len(case_ids), 1), 6 * 60 * 60))
+    reservation = uuid.uuid4().hex
     ok, err = actuator_registry.reserve_slots(
         actuator_id,
         len(case_ids),
         ttl_seconds=ttl,
-        meta={"case_ids": case_ids, "trigger": "http_trigger_batch"},
+        meta={"reservation": reservation, "case_ids": case_ids, "trigger": "http_trigger_batch"},
     )
     if not ok:
         return Response({'error': err}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -1442,7 +1448,7 @@ def trigger_batch_execution(request):
                 batch_name += f" 等{len(case_ids)}个用例"
 
         batch = UiBatchExecutionRecord.objects.create(
-            name=batch_name,
+            name=batch_name, project_id=project_id,
             total_cases=len(case_ids),
             status=1,
             trigger_type=trigger_type,
@@ -1478,6 +1484,8 @@ def trigger_batch_execution(request):
 
         args = {
             'case_ids': case_ids,
+            'auth_snapshots': snapshots, 'task_token': reservation,
+            'project_id': project_id,
             'actuator_id': actuator_id,
             'batch_id': batch.id,
             'executor_id': request.user.id,
@@ -1487,15 +1495,12 @@ def trigger_batch_execution(request):
             'trigger_type': trigger_type,
         }
 
-        # 登记 HTTP 触发的批量任务来源（user='system'），执行器回传结果时
-        # consumers.verify_result_source 才能命中；漏登记会在严格模式被拒
-        actuator.register_actuator_task(actuator, args, 'system')
-
-        # 通过 WebSocket 发送给执行器
+        initiator = request.user.get_username()
+        actuator.register_actuator_task(actuator, args, initiator)
         async_to_sync(actuator.send_json)(SocketDataModel(
             code=ResponseCode.SUCCESS,
             msg='execute_batch',
-            user='system',
+            user=initiator,
             is_notice=NoticeType.ACTUATOR,
             data=QueueModel(
                 func_name=UiSocketEnum.TEST_CASE_BATCH,
@@ -1503,7 +1508,8 @@ def trigger_batch_execution(request):
             ),
         ))
     except Exception:
-        actuator_registry.adjust_busy_slots(actuator_id, -reserved_count)
+        actuator.actuator_runs.pop(reservation, None)
+        actuator_registry.adjust_busy_slots(actuator_id, -reserved_count, reservation=reservation)
         if batch is not None:
             batch.status = 4  # all failed
             batch.end_time = tz.now()
@@ -1576,15 +1582,6 @@ def _parse_opt_int(value):
         return None
 
 
-def _auth_state_by_id(auth_state_id):
-    """按 id 取登录态快照（录制表单选择的绑定登录态），无效返回 None。"""
-    if not auth_state_id:
-        return None
-    state = UiAuthState.objects.filter(id=auth_state_id).first()
-    if state is None or not isinstance(state.state_json, dict):
-        return None
-    return state
-
 def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta):
     """创建录制会话并启动浏览器（含可选前置步骤执行）。
 
@@ -1607,9 +1604,10 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
         # 仅当录制表单选择了绑定登录态时才注入；清空选择框 → 无痕启动（不注入任何登录态）
         storage_state = None
         if meta.auth_state_id:
-            bound = _auth_state_by_id(meta.auth_state_id)
+            bound = UiAuthState.objects.filter(pk=meta.auth_state_id, env_config=env_config, is_active=True).first()
             if bound is not None:
                 storage_state = bound.state_json
+                credential_summary(storage_state)
                 logger.info(
                     '录制器注入绑定登录态（auth_state_id=%s）', meta.auth_state_id,
                 )
@@ -1624,7 +1622,7 @@ def _start_recorder_session(env_config, page, base_url, skill_dir, request, meta
         if storage_state:
             start_params['storage_state'] = storage_state
         result = session.request('start', start_params, timeout=90)
-    except RecorderSessionError:
+    except (RecorderSessionError, ValidationError):
         recorder_manager.close(session_id, graceful=False)
         raise
 
@@ -1724,7 +1722,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
 
     @staticmethod
     def _owner_ok(request, meta) -> bool:
-        return meta.user_id == request.user.username or request.user.is_superuser
+        return meta.owner_id == request.user.pk
 
     def create(self, request):
         """POST recorder-sessions/
@@ -1740,6 +1738,10 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         if env_config is None:
             return Response({'detail': '请选择有效的环境配置'}, status=status.HTTP_400_BAD_REQUEST)
 
+        require_project(request.user, env_config.project_id, *RECORD_PERMS)
+        auth_state_id = request.data.get('auth_state_id')
+        if auth_state_id and not UiAuthState.objects.filter(pk=auth_state_id, env_config=env_config, is_active=True).exists():
+            raise ValidationError('请选择当前环境的登录态')
         page = UiPage.objects.filter(id=request.data.get('page_id'), project=env_config.project).first()
         if page is None:
             return Response({'detail': '请选择当前项目下的页面'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1787,7 +1789,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
 
         session_id = None
         meta = RecorderSessionMeta(
-            user_id=request.user.username,
+            user_id=request.user.username, owner_id=request.user.pk,
             project_id=env_config.project_id,
             page_id=page.id,
             page_step_id=page_step.id,
@@ -1842,6 +1844,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         if session is None or meta is None or not self._owner_ok(request, meta):
             return Response({'detail': '录制会话不存在或无权访问'}, status=status.HTTP_404_NOT_FOUND)
 
+        require_project(request.user, meta.project_id, *RECORD_PERMS)
         try:
             result = session.request('finish', {}, timeout=30)
         except RecorderSessionError as exc:
@@ -1857,8 +1860,8 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
             'steps_created': 0,
         }
         if (meta.create_elements or meta.create_steps) and meta.page_step_id:
-            page = UiPage.objects.filter(id=meta.page_id).first()
-            page_step = UiPageSteps.objects.filter(id=meta.page_step_id).first()
+            page = UiPage.objects.filter(id=meta.page_id, project_id=meta.project_id).first()
+            page_step = UiPageSteps.objects.filter(id=meta.page_step_id, page_id=meta.page_id, project_id=meta.project_id).first()
             if page and page_step:
                 apply_stats = apply_recorded_actions(
                     page=page,
@@ -1889,6 +1892,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         ).first()
         if env_config is None:
             return Response({'detail': '请选择有效的环境配置'}, status=status.HTTP_400_BAD_REQUEST)
+        require_project(request.user, env_config.project_id, 'ui_automation.add_uiauthstate')
         skill_dir = _resolve_recorder_skill_dir()
         if not skill_dir:
             return Response(
@@ -1896,7 +1900,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         meta = RecorderSessionMeta(
-            user_id=request.user.username,
+            user_id=request.user.username, owner_id=request.user.pk,
             project_id=env_config.project_id,
             page_id=None,
             page_step_id=None,
@@ -1954,6 +1958,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         if session is None or meta is None or not self._owner_ok(request, meta):
             return Response({'detail': '录制会话不存在或无权访问'}, status=status.HTTP_404_NOT_FOUND)
 
+        require_project(request.user, meta.project_id, 'ui_automation.add_uiauthstate')
         if not meta.env_config_id:
             return Response(
                 {'detail': '该录制会话未关联环境配置，无法保存登录态（请使用新的录制会话）'},
@@ -1968,13 +1973,8 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         except RecorderSessionError as exc:
             return Response({'detail': f'保存登录态失败: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        cookies = storage_state.get('cookies') or []
-        origins = storage_state.get('origins') or []
-        ls_total = sum(len(o.get('localStorage') or []) for o in origins)
-        # sessionStorage 扩展字段（Playwright storageState 不含 sessionStorage，录制器单独采集）
-        ss_origins = storage_state.get('session_storage') or []
-        ss_total = sum(len(o.get('sessionStorage') or []) for o in ss_origins if isinstance(o, dict))
-        if not cookies and ls_total == 0 and ss_total == 0:
+        summary = credential_summary(storage_state)
+        if not any((summary['cookies'], summary['local_storage'], summary['session_storage'])):
             return Response(
                 {'detail': '当前浏览器没有捕获到任何登录凭据（cookies/localStorage/sessionStorage），'
                            '请先在录制画布中完成目标系统登录后再保存登录态'},
@@ -1989,6 +1989,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
         auth_state = None
         target_id = request.data.get('auth_state_id')
         if target_id not in (None, ''):
+            require_project(request.user, meta.project_id, 'ui_automation.change_uiauthstate')
             try:
                 target_id = int(target_id)
             except (TypeError, ValueError):
@@ -2020,7 +2021,7 @@ class UiRecorderSessionViewSet(viewsets.ViewSet):
             'auth_state_id': auth_state.id,
             'name': auth_state.name,
             'env_config_id': env_config.id,
-            'cookies': len(cookies),
-            'local_storage_keys': ls_total,
-            'session_storage_keys': ss_total,
+            'cookies': summary['cookies'],
+            'local_storage_keys': summary['local_storage'],
+            'session_storage_keys': summary['session_storage'],
         }, status=status.HTTP_200_OK if target_id else status.HTTP_201_CREATED)

@@ -4,7 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Q, OuterRef, Subquery
 from django.contrib.auth.models import User
 from django.utils import timezone
 from datetime import timedelta
@@ -40,11 +40,13 @@ class ProjectViewSet(BaseModelViewSet):
         user = self.request.user
 
         # 条件：超级用户；动作：返回全部项目；结果：平台管理员可跨项目管理。
+        role = ProjectMember.objects.filter(project_id=OuterRef('pk'), user=user).values('role')[:1]
+        projects = Project.objects.annotate(current_user_role=Subquery(role))
         if user.is_superuser:
-            return Project.objects.all()
+            return projects
 
         # 非超级用户仅可查看自己参与的项目，避免越权枚举其他项目。
-        return Project.objects.filter(members__user=user).distinct()
+        return projects.filter(members__user=user).distinct()
 
     def get_serializer_class(self):
         """
@@ -61,7 +63,9 @@ class ProjectViewSet(BaseModelViewSet):
         根据操作类型设置不同的权限
         """
         # 成员管理操作：先过项目成员模型权限，再校验调用者属于该项目。
-        if self.action in ['members', 'add_member', 'remove_member', 'update_member_role']:
+        if self.action in ['add_member', 'remove_member', 'update_member_role']:
+            return [HasProjectMemberPermission(), IsProjectAdmin()]
+        if self.action == 'members':
             return [HasProjectMemberPermission(), IsProjectMember()]
 
         # 统计接口只读，要求登录且属于项目即可。
@@ -137,12 +141,30 @@ class ProjectViewSet(BaseModelViewSet):
         serializer = ProjectMemberSerializer(members, many=True)
         return Response(serializer.data)
 
+    def _locked_member_project(self):
+        project = self.get_object()
+        project = Project.objects.select_for_update().get(pk=project.pk)
+        self.check_object_permissions(self.request, project)
+        return project
+
+    def _can_transfer_owner(self, project):
+        user = self.request.user
+        return user.is_superuser or (
+            user.has_perm('projects.change_projectmember') and
+            project.members.filter(user=user, role='owner').exists()
+        )
+
+    @staticmethod
+    def _demote_previous_owners(member):
+        member.project.members.filter(role='owner').exclude(pk=member.pk).update(role='admin')
+
     @action(detail=True, methods=['post'])
+    @transaction.atomic
     def add_member(self, request, pk=None):
         """
         添加项目成员
         """
-        project = self.get_object()
+        project = self._locked_member_project()
 
         serializer = ProjectMemberCreateSerializer(
             data=request.data,
@@ -151,26 +173,32 @@ class ProjectViewSet(BaseModelViewSet):
 
         # 条件：参数合法；动作：创建成员并返回详情；结果：前端可直接刷新成员列表。
         if serializer.is_valid():
+            transfer = serializer.validated_data.get('role') == 'owner'
+            if transfer and not self._can_transfer_owner(project):
+                return Response({'error': '只有项目拥有者或超级管理员可以转移拥有者'}, status=403)
             member = serializer.save()
+            if transfer:
+                self._demote_previous_owners(member)
             member_serializer = ProjectMemberSerializer(member)
             return Response(member_serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=['delete'])
+    @transaction.atomic
     def remove_member(self, request, pk=None):
         """
         移除项目成员
         """
-        project = self.get_object()
+        project = self._locked_member_project()
         user_id = request.data.get('user_id')
 
         # 条件：缺失 user_id；动作：直接拒绝；结果：避免执行无目标的删除操作。
         if not user_id:
             return Response({"error": "必须提供用户ID"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 条件：目标是 owner 且操作者非超级用户；动作：拒绝；结果：避免项目失去拥有者。
+        # 先转移拥有者，再移除原成员。
         member = get_object_or_404(ProjectMember, project=project, user_id=user_id)
-        if member.role == 'owner' and not request.user.is_superuser:
+        if member.role == 'owner':
             return Response({"error": "不能移除项目拥有者"}, status=status.HTTP_403_FORBIDDEN)
 
         # 条件：尝试删除自己且非超级用户；动作：拒绝；结果：避免误操作导致无人管理。
@@ -182,11 +210,12 @@ class ProjectViewSet(BaseModelViewSet):
         return Response({"message": "成员已成功移除"}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['patch'])
+    @transaction.atomic
     def update_member_role(self, request, pk=None):
         """
         更新项目成员角色
         """
-        project = self.get_object()
+        project = self._locked_member_project()
         user_id = request.data.get('user_id')
         role = request.data.get('role')
 
@@ -201,32 +230,17 @@ class ProjectViewSet(BaseModelViewSet):
 
         member = get_object_or_404(ProjectMember, project=project, user_id=user_id)
 
-        # 条件：目标成员当前是 owner；动作：仅 owner/超级用户可修改；结果：限制关键角色变更入口。
-        if member.role == 'owner' and not (request.user.is_superuser or
-                                          ProjectMember.objects.filter(project=project, user=request.user, role='owner').exists()):
-            return Response({"error": "只有项目拥有者或超级管理员可以修改拥有者角色"}, status=status.HTTP_403_FORBIDDEN)
+        if role == 'owner' and not self._can_transfer_owner(project):
+            return Response({'error': '只有项目拥有者或超级管理员可以转移拥有者'}, status=403)
+        if member.role == 'owner' and role != 'owner':
+            return Response({'error': '请先将拥有者转移给其他成员'}, status=403)
+        if member.user_id == request.user.id and not request.user.is_superuser:
+            return Response({'error': '不能修改自己的角色'}, status=403)
 
-        # 条件：尝试修改自己角色且非超级用户；动作：拒绝；结果：避免误降权后无法恢复。
-        if member.user == request.user and not request.user.is_superuser:
-            return Response({"error": "不能修改自己的角色"}, status=status.HTTP_403_FORBIDDEN)
-
-        # 使用事务确保数据一致性
-        with transaction.atomic():
-            # 条件：目标角色为 owner；动作：先处理旧 owner；结果：确保任一时刻仅有一个 owner。
-            if role == 'owner':
-                # 查找当前的项目拥有者
-                current_owners = ProjectMember.objects.filter(project=project, role='owner')
-
-                # 如果存在拥有者且不是当前要修改的成员
-                if current_owners.exists() and current_owners.first().user_id != int(user_id):
-                    # 将原拥有者降级为管理员
-                    for owner in current_owners:
-                        owner.role = 'admin'
-                        owner.save()
-
-            # 更新当前成员的角色
-            member.role = role
-            member.save()
+        if role == 'owner':
+            self._demote_previous_owners(member)
+        member.role = role
+        member.save(update_fields=['role'])
 
         serializer = ProjectMemberSerializer(member)
         return Response(serializer.data)

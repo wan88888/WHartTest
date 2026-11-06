@@ -152,7 +152,7 @@ export const testCaseApi = {
 
 // ==================== 用例步骤管理 ====================
 export const caseStepsApi = {
-  list: (params?: { test_case?: number; status?: number }) =>
+  list: (params?: { test_case?: number; status?: number; page?: number; page_size?: number }) =>
     request.get<PaginatedResponse<UiCaseStepsDetailed>>(`${BASE_URL}/case-steps/`, { params }),
 
   get: (id: number) => request.get<UiCaseStepsDetailed>(`${BASE_URL}/case-steps/${id}/`),
@@ -165,11 +165,20 @@ export const caseStepsApi = {
 
   delete: (id: number) => request.delete(`${BASE_URL}/case-steps/${id}/`),
 
+  reorder: (testCaseId: number, ids: number[]) =>
+    request.post(`${BASE_URL}/case-steps/reorder/`, { test_case: testCaseId, ids }),
+
   batchUpdate: (testCaseId: number, steps: Omit<UiCaseStepsDetailed, 'test_case' | 'status' | 'error_message' | 'result_data' | 'created_at' | 'updated_at'>[]) =>
     request.post(`${BASE_URL}/case-steps/batch_update/`, { test_case: testCaseId, steps }),
 }
 
 // ==================== 执行记录管理 ====================
+export const loadArtifact = async (url: string): Promise<Blob> => {
+  if (!/^\/api\/ui-automation\/artifacts\/\d+\/$/.test(url)) throw new Error('执行产物链接无效')
+  const response = await request.get<{ data: Blob }>(url.slice(4), { responseType: 'blob' })
+  return response.data.data
+}
+
 export const executionRecordApi = {
   list: (params?: { project?: number; test_case?: number; status?: number; trigger_type?: string }) =>
     request.get<PaginatedResponse<UiExecutionRecord>>(`${BASE_URL}/execution-records/`, { params }),

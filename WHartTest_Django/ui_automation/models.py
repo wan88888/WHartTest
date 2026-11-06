@@ -352,6 +352,7 @@ class UiBatchExecutionRecord(models.Model):
     ]
     TRIGGER_TYPE_CHOICES = [('manual', _('手动执行')), ('scheduled', _('定时执行')), ('api', _('API 触发'))]
 
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, related_name='ui_execution_batches')
     name = models.CharField(_('批次名称'), max_length=255)
     total_cases = models.IntegerField(_('用例总数'), default=0)
     passed_cases = models.IntegerField(_('成功数'), default=0)
@@ -386,7 +387,7 @@ class UiBatchExecutionRecord(models.Model):
         """更新统计信息"""
         records = self.execution_records.all()
         self.passed_cases = records.filter(status=2).count()
-        self.failed_cases = records.filter(status=3).count()
+        self.failed_cases = records.filter(status__in=(3, 4)).count()
         completed = self.passed_cases + self.failed_cases
         if completed >= self.total_cases:
             if self.failed_cases == 0:
@@ -439,6 +440,15 @@ class UiExecutionRecord(models.Model):
         verbose_name_plural = _('UI 执行记录')
         ordering = ['-created_at']
         db_table = 'ui_execution_record'
+        permissions = [('manage_actuators', _('管理共享 UI 执行器'))]
+
+
+class UiExecutionArtifact(models.Model):
+    """A file issued by the server for one case, claimed once by its result."""
+    test_case = models.ForeignKey(UiTestCase, on_delete=models.CASCADE)
+    record = models.ForeignKey(UiExecutionRecord, on_delete=models.CASCADE, null=True, related_name='artifacts')
+    path = models.CharField(max_length=255, unique=True)
+    kind = models.CharField(max_length=12, choices=[('screenshot', '截图'), ('trace', 'Trace')])
 
 
 class UiPublicData(models.Model):

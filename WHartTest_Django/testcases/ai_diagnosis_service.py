@@ -7,6 +7,9 @@ import json
 import logging
 import re
 from typing import Any, Dict, Optional
+from django.core import signing
+from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -209,9 +212,13 @@ def extract_failure_context(
     step_id_val = failed_step_data.get("step_id") if failed_step_data else None
 
     # 1. 优先通过 step_id 精准反查 UiPageStepsDetailed
-    if step_id_val:
+    if str(step_id_val or "").isdigit():
         from ui_automation.models import UiPageStepsDetailed
-        detailed_step = UiPageStepsDetailed.objects.filter(id=step_id_val).select_related(
+        detailed_step = UiPageStepsDetailed.objects.filter(
+            Q(element__isnull=True) | Q(element__page__project_id=testcase.project_id),
+            id=step_id_val, page_step__project_id=testcase.project_id,
+            page_step__case_usages__test_case_id=testcase.ui_test_case_id,
+        ).select_related(
             "element", "page_step", "page_step__page"
         ).first()
         if detailed_step:
@@ -229,14 +236,16 @@ def extract_failure_context(
 
     # 2. 如果未找到元素，尝试根据用例步骤序号兜底匹配
     if not element_id and testcase.ui_test_case:
-        case_steps = list(testcase.ui_test_case.case_steps.all().select_related(
+        case_steps = list(testcase.ui_test_case.case_steps.filter(page_step__project_id=testcase.project_id).select_related(
             "page_step", "page_step__page"
         ).order_by("case_sort"))
         if 0 <= step_sort - 1 < len(case_steps):
             target_step = case_steps[step_sort - 1]
             if target_step.page_step and target_step.page_step.page:
                 page_name = page_name or target_step.page_step.page.name
-            details = list(target_step.page_step.step_details.all().select_related("element").order_by("step_sort"))
+            details = list(target_step.page_step.step_details.filter(
+                Q(element__isnull=True) | Q(element__page__project_id=testcase.project_id)
+            ).select_related("element").order_by("step_sort"))
             if details:
                 first_detail = details[0]
                 operation_type = operation_type or first_detail.ope_key or ""
@@ -298,19 +307,12 @@ def diagnose_execution_failure(
     """
     对功能用例执行失败进行 AI 智能归因与自愈诊断
     """
-    ui_record = None
-    if ui_record_id:
-        ui_record = UiExecutionRecord.objects.filter(id=ui_record_id).first()
-        if not ui_record:
-            raise ValueError(f"未找到指定的 UI 执行记录 (ID: {ui_record_id})")
-        if testcase.ui_test_case and ui_record.test_case_id != testcase.ui_test_case_id:
-            raise ValueError(f"指定的执行记录 (ID: {ui_record_id}) 不属于当前测试用例关联的 UI 自动化用例")
-    elif testcase.ui_test_case:
-        ui_record = UiExecutionRecord.objects.filter(
-            test_case=testcase.ui_test_case
-        ).order_by("-id").first()
-    else:
-        raise ValueError("当前测试用例尚未关联 UI 自动化用例且未提供有效的执行记录")
+    if not testcase.ui_test_case_id or testcase.ui_test_case.project_id != testcase.project_id:
+        raise ValueError("请先绑定当前项目的 UI 自动化用例")
+    records = UiExecutionRecord.objects.filter(test_case_id=testcase.ui_test_case_id)
+    ui_record = records.filter(pk=ui_record_id).first() if ui_record_id is not None else records.order_by("-id").first()
+    if not ui_record:
+        raise ValueError("未找到属于当前绑定用例的 UI 执行记录")
 
     failure_info = extract_failure_context(testcase, ui_record)
 
@@ -390,35 +392,54 @@ UI用例名称: {testcase.ui_test_case.name if testcase.ui_test_case else '无'}
     diagnosis_result["diagnosed_at"] = timezone.now().isoformat()
     diagnosis_result["ui_execution_record_id"] = ui_record.id if ui_record else None
 
+    suggestion = diagnosis_result.get("healing_suggestion")
+    if isinstance(suggestion, dict) and suggestion.get("can_self_heal"):
+        element_id = failure_info["failure_step"].get("element_id")
+        locator_type = suggestion.get("suggested_locator_type")
+        value = suggestion.get("suggested_locator_value")
+        element = _bound_elements(testcase).filter(pk=element_id).first()
+        if element and user and user.has_perm("ui_automation.change_uielement") and (
+            str(suggestion.get("element_id") or element_id) == str(element_id)
+            and locator_type in dict(UiElement.LOCATOR_TYPE_CHOICES) and isinstance(value, str) and value.strip()
+        ):
+            suggestion["element_id"] = element_id
+            suggestion["token"] = signing.dumps({
+                "user": user.pk, "case": testcase.pk, "ui_case": testcase.ui_test_case_id,
+                "record": ui_record.pk, "element": element.pk, "type": locator_type, "value": value,
+                "previous": [element.locator_type, element.locator_value],
+            }, salt="testcases.healing")
+        else:
+            suggestion["can_self_heal"] = False
     return diagnosis_result
 
 
-def apply_healing_to_element(
-    testcase,
-    healing_data: Dict[str, Any],
-    user=None,
-) -> Dict[str, Any]:
-    """
-    一键应用 AI 自愈建议，回写 UI 元素定位配置
-    """
-    element_id = healing_data.get("element_id")
-    suggested_type = healing_data.get("suggested_locator_type")
-    suggested_value = healing_data.get("suggested_locator_value")
+def _bound_elements(testcase):
+    return UiElement.objects.filter(
+        page__project_id=testcase.project_id,
+        step_details__page_step__project_id=testcase.project_id,
+        step_details__page_step__case_usages__test_case_id=testcase.ui_test_case_id,
+    )
 
-    if not element_id:
-        element_name = healing_data.get("element_name")
-        if element_name and testcase.ui_test_case:
-            elem = UiElement.objects.filter(
-                page__project_id=testcase.project_id,
-                name=element_name
-            ).first()
-            if elem:
-                element_id = elem.id
 
-    if not element_id or not suggested_value:
-        raise ValueError("缺少待修复的元素 ID 或新的定位表达式")
-
-    element = UiElement.objects.get(id=element_id, page__project_id=testcase.project_id)
+@transaction.atomic
+def apply_healing_to_element(testcase, healing_data: Dict[str, Any], user=None) -> Dict[str, Any]:
+    try:
+        grant = signing.loads(healing_data.get("token") or "", salt="testcases.healing", max_age=3600)
+    except signing.BadSignature:
+        raise ValueError("请重新诊断后应用自愈建议") from None
+    if (not user or not user.has_perm("ui_automation.change_uielement")
+            or grant["user"] != user.pk or grant["case"] != testcase.pk
+            or grant["ui_case"] != testcase.ui_test_case_id
+            or not UiExecutionRecord.objects.filter(pk=grant["record"], test_case_id=testcase.ui_test_case_id,
+                                                    test_case__project_id=testcase.project_id).exists()):
+        raise ValueError("该建议不属于当前用例或用户")
+    for field, key in (("element_id", "element"), ("suggested_locator_type", "type"), ("suggested_locator_value", "value")):
+        if field in healing_data and healing_data[field] != grant[key]:
+            raise ValueError("自愈建议与本次诊断不一致")
+    element = _bound_elements(testcase).select_for_update().filter(pk=grant["element"]).first()
+    if not element or [element.locator_type, element.locator_value] != grant["previous"]:
+        raise ValueError("元素或定位已变更，请重新诊断")
+    suggested_type, suggested_value = grant["type"], grant["value"]
 
     old_locator_type = element.locator_type
     old_locator_value = element.locator_value

@@ -61,7 +61,7 @@
             <template #icon><icon-eye /></template>
             {{ pageText.details }}
           </a-button>
-          <a-popconfirm :content="pageText.deleteConfirm" @ok="handleDelete(record.id)">
+          <a-popconfirm v-if="authStore.hasPermission('ui_automation.delete_uiexecutionrecord')" :content="pageText.deleteConfirm" @ok="handleDelete(record.id)">
             <a-button type="text" size="mini" status="danger">
               <template #icon><icon-delete /></template>
               {{ pageText.delete }}
@@ -97,6 +97,9 @@
               <template #icon><icon-eye /></template>
               {{ pageText.viewTrace }}
             </a-button>
+            <a-button v-if="currentRecord.trace_path" size="small" @click="downloadTrace(currentRecord.trace_path)">
+              {{ isEnglish ? 'Download Trace' : '下载 Trace' }}
+            </a-button>
             <span v-else>-</span>
           </a-descriptions-item>
         </a-descriptions>
@@ -129,7 +132,7 @@
                   <a-alert class="step-message-alert" :type="getStepStatus(step) === 'failed' ? 'error' : 'info'" :title="formatDynamicText(getStepMessage(step))" />
                 </div>
                 <div v-if="getStepScreenshot(step)" class="step-screenshot">
-                  <a-image :src="formatScreenshotUrl(getStepScreenshot(step))" width="100%" fit="contain" />
+                  <ExecutionScreenshot :src="getStepScreenshot(step)" width="100%" fit="contain" />
                 </div>
                 <div class="step-raw">
                   <a-collapse>
@@ -147,7 +150,7 @@
           <a-divider>{{ pageText.executionScreenshots }}</a-divider>
           <a-image-preview-group>
             <a-space wrap>
-              <a-image
+              <ExecutionScreenshot
                 v-for="(img, idx) in currentRecord.screenshots"
                 :key="idx"
                 :src="img"
@@ -174,13 +177,16 @@ import { useRouter } from 'vue-router'
 import { IconRefresh, IconEye, IconDelete } from '@arco-design/web-vue/es/icon'
 import { Message } from '@arco-design/web-vue'
 import { useAppI18n } from '@/composables/useAppI18n'
-import { executionRecordApi } from '../api'
+import ExecutionScreenshot from '../components/ExecutionScreenshot.vue'
+import { executionRecordApi, loadArtifact } from '../api'
 import type { UiExecutionRecord, ExecutionStatus } from '../types'
 import { STATUS_LABELS, extractPaginationData, extractResponseData } from '../types'
 import { useProjectStore } from '@/store/projectStore'
+import { useAuthStore } from '@/store/authStore'
 
 const router = useRouter()
 const projectStore = useProjectStore()
+const authStore = useAuthStore()
 const projectId = computed(() => projectStore.currentProject?.id)
 const { isEnglish, tl } = useAppI18n()
 
@@ -198,7 +204,7 @@ const pageText = computed(() => (
         unknown: 'Unknown',
         details: 'Details',
         delete: 'Delete',
-        deleteConfirm: 'Delete this execution record? Related screenshots, videos, and trace files will also be deleted.',
+        deleteConfirm: 'Delete this execution record and its saved screenshots and trace?',
         drawerTitle: 'Execution record details',
         caseName: 'Case Name',
         executor: 'Executor',
@@ -239,7 +245,7 @@ const pageText = computed(() => (
         unknown: '未知',
         details: '详情',
         delete: '删除',
-        deleteConfirm: '确定删除此执行记录？关联的截图、视频、Trace文件将一并删除。',
+        deleteConfirm: '确定删除此执行记录及其保存的截图和 Trace 吗？',
         drawerTitle: '执行记录详情',
         caseName: '用例名称',
         executor: '执行人',
@@ -379,12 +385,17 @@ const formatExecutionLog = (log?: string | null) => {
     .join('\n')
 }
 
-const formatScreenshotUrl = (path: string) => {
-  if (!path) return ''
-  if (path.startsWith('data:')) return path
-  if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('/media/')) return path
-  const filename = path.split('/').pop() || path
-  return `/media/ui_screenshots/${filename}`
+const downloadTrace = async (url: string) => {
+  try {
+    const href = URL.createObjectURL(await loadArtifact(url))
+    const link = document.createElement('a')
+    link.href = href
+    link.download = 'trace.zip'
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(href), 1000)
+  } catch {
+    Message.error(tl('下载失败'))
+  }
 }
 
 const fetchRecords = async () => {
